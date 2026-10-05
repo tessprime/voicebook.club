@@ -1,0 +1,50 @@
+{
+  "lexicon": 1,
+  "id": "club.voicebook.recording",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A voice-practice recording: the reader's audio of one passage of a work.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["createdAt", "work", "audio"],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the practice happened. Practice days are derived from this."
+          },
+          "work": {
+            "type": "string",
+            "maxLength": 3000,
+            "maxGraphemes": 300,
+            "description": "Title of the book or work being read."
+          },
+          "chapter": {
+            "type": "string",
+            "maxLength": 640,
+            "maxGraphemes": 64,
+            "description": "Chapter or passage identifier within the work."
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Length of the audio in milliseconds, if known."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 30000,
+            "maxGraphemes": 3000,
+            "description": "Freeform notes about the practice session."
+          },
+          "audio": {
+            "type": "blob",
+            "accept": ["audio/*"],
+            "maxSize": 100000000
+          }
+        }
+      }
+    }
+  }
+}

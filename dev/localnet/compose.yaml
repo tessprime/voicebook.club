@@ -41,6 +41,9 @@ services:
       # Upstream main as of 2026-09-28. Bump the commit to update.
       context: https://github.com/did-method-plc/did-method-plc.git#9c8ea2fe23b89a5c1011246cbb4957dad9dbf7db
       dockerfile: packages/server/Dockerfile
+      # pnpm's parallel registry downloads time out on the default build
+      # network under WSL.
+      network: host
     image: voicebook-localnet/plc:9c8ea2f
     network_mode: host
     environment:
@@ -100,7 +103,7 @@ services:
       JETSTREAM_RELAY_URL: http://localhost:2583
       JETSTREAM_PLC_URL: http://localhost:2582
       JETSTREAM_ADDR: 127.0.0.1:6008
-      JETSTREAM_DATA_DIR: /data
+      JETSTREAM_DATA_DIR: /home/nonroot/data
       JETSTREAM_LOG_FORMAT: text
       # Jetstream's first-start backfill walks the relay's listHosts, which a
       # PDS doesn't implement. Naming repos explicitly skips that walk. The
@@ -108,7 +111,9 @@ services:
       # the live stream instead.
       JETSTREAM_BACKFILL_REPOS: did:plc:placeholderplaceholder00
     volumes:
-      - jetstream-data:/data
+      # Mounted at the image user's home so the new volume inherits its
+      # ownership (the image runs as uid 65532).
+      - jetstream-data:/home/nonroot
     depends_on:
       pds:
         condition: service_healthy

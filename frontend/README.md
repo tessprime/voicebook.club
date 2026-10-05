@@ -1,0 +1,26 @@
+# Voicebook frontend
+
+React + TypeScript (Vite). Signs in with ATProto OAuth in the browser
+(`@atproto/oauth-client-browser`), writes recordings straight to the user's
+PDS, and reads calendars, history and friends' activity from the backend.
+
+```bash
+nvm use
+npm install
+npm run dev          # http://127.0.0.1:5173 (not "localhost": OAuth loopback redirects need the IP)
+npm run test:e2e     # Playwright; needs dev/localnet up and seeded, and the backend running
+```
+
+`.env.development` points identity resolution at the local network
+(`VITE_PLC_URL`, `VITE_HANDLE_RESOLVER`). `/api` is proxied to the backend on
+`127.0.0.1:3000`.
+
+Notes:
+
+- The app is an OAuth loopback client: its client ID is an
+  `http://localhost?redirect_uri=…&scope=…` URL, so no client registration is
+  needed locally. Production needs a hosted `client-metadata.json`.
+- Scopes are granular: `repo:club.voicebook.recording` and `blob:audio/*`.
+- PDSes don't honor Range requests, so the player fetches the whole blob into
+  an object URL before playing; otherwise Ogg files have no duration and
+  can't seek.

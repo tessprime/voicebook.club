@@ -1,3 +1,5 @@
 node_modules/
+target/
+backend/data/
 dev/localnet/.env
 dev/localnet/localnet.json

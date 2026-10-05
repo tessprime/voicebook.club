@@ -62,6 +62,20 @@ websocat 'ws://localhost:6008/subscribe?wantedCollections=club.voicebook.recordi
 
 ## Workarounds
 
+- **Building the PLC image:** `docker compose up` builds it on first run, which
+  needs buildx 0.17 or newer (`sudo apt install docker-buildx` upgrades
+  Ubuntu's 0.12). Without that, build it directly:
+
+  ```bash
+  docker build --network host -t voicebook-localnet/plc:9c8ea2f \
+    -f packages/server/Dockerfile \
+    https://github.com/did-method-plc/did-method-plc.git#9c8ea2fe23b89a5c1011246cbb4957dad9dbf7db
+  ```
+
+  Host networking matters under WSL: on the default build network pnpm's
+  parallel downloads time out.
+- **Jetstream data volume:** the image runs as uid 65532, so its volume is
+  mounted at `/home/nonroot` to inherit that ownership.
 - **Jetstream backfill:** on first start Jetstream walks the relay's
   `listHosts`, which a PDS doesn't implement. `JETSTREAM_BACKFILL_REPOS` names
   a placeholder repo to skip that walk. Accounts created afterwards arrive

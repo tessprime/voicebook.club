@@ -8,12 +8,13 @@ The goal is to validate the core product and architecture before any production 
 
 The MVP uses:
 
-- **Backend:** Rust
-- **Frontend:** TypeScript
-- **Primary identity/authentication:** AT Protocol / Bluesky OAuth
+- **Backend:** Rust (a read-only indexer and query API)
+- **Frontend:** TypeScript (owns sign-in and all writes)
+- **Primary identity/authentication:** AT Protocol / Bluesky OAuth, performed in the browser
 - **Canonical user-owned app data:** ATProto repositories and blobs
+- **Event stream:** Jetstream
 - **Local application index/cache:** SQLite
-- **Environment:** local development only
+- **Environment:** local development only, against a local ATProto network (§31)
 
 Production hosting, monitoring, backup policy, CDN behavior, and deployment automation are explicitly out of scope for this phase.
 
@@ -39,37 +40,39 @@ The local MVP should prove that a user can:
 
 ## 3. Core Architectural Principle
 
-The MVP should treat **ATProto as canonical storage** and **SQLite as reconstructible application state** wherever possible.
+The MVP treats **ATProto as canonical storage** and **SQLite as reconstructible application state**.
 
-Conceptually:
+Everything a user writes is public ATProto data in their own repository, so the browser writes it directly to the user's PDS and the backend never needs user credentials:
 
 ```text
-Browser
+Browser (TypeScript)
+   |  OAuth session (DPoP-bound, held by the browser)
    |
-   v
-TypeScript Frontend
+   +--> User's PDS
+   |      - uploadBlob (audio)
+   |      - createRecord (club.voicebook.recording)
+   |      - listRecords / getBlob (own data, playback)
    |
-   v
-Rust Backend
-   |
-   +--> SQLite
-   |      - indexed recordings
-   |      - known users / DIDs
-   |      - derived social/activity data
-   |      - local session/application state
-   |
-   +--> ATProto
-          - OAuth identity
-          - user repositories
-          - recording metadata records
-          - audio blobs
+   +--> Rust Backend (read-only, public data)
+          - /api/... queries: calendar, recordings, friends activity
+          |
+          +--> SQLite
+          |      - known members (DIDs)
+          |      - indexed recordings
+          |      - members' follows
+          |      - Jetstream cursor
+          |
+          +--> Jetstream  (live recording and follow events)
+          +--> PLC / PDSes (DID resolution, backfill via listRecords)
 ```
+
+The backend's one job that the browser cannot do cheaply is knowing **who uses Voicebook**, so it can answer "which of the people I follow have practiced recently?" without the browser crawling every followed account's repository.
 
 The most important design rule is:
 
-> If the local SQLite database is deleted, the application should be able to reconstruct its user-content index from a known set of ATProto DIDs.
+> If the local SQLite database is deleted, the backend must rebuild it from ATProto alone.
 
-The MVP should explicitly test this.
+The MVP explicitly tests this (§21).
 
 ---
 
@@ -77,16 +80,16 @@ The MVP should explicitly test this.
 
 The local prototype should validate:
 
-- ATProto OAuth from localhost.
-- Session persistence across local backend restarts.
+- ATProto OAuth in the browser against a local PDS.
+- Session persistence across page reloads.
 - Creation of custom application records in a user's ATProto repository.
 - Upload of audio blobs to the user's PDS.
-- Reading recordings back from ATProto.
-- Local indexing into SQLite.
-- Rebuilding the SQLite index from ATProto.
-- Playback of uploaded recordings in the frontend.
+- Playback of recordings directly from the PDS.
+- Indexing of recordings and follows from Jetstream into SQLite.
+- Discovery of new members from the event stream, with backfill from their PDS.
+- Rebuilding the SQLite index from ATProto after deleting it.
 - Derivation of calendar activity from indexed recordings.
-- Retrieval of Bluesky follow relationships for known Voicebook users.
+- Friends activity from members' Bluesky follows.
 
 ---
 
@@ -168,18 +171,17 @@ No separate "practice happened" record is required initially.
 
 ## 8. Recording Flow
 
-The simplest MVP flow should be:
+The simplest MVP flow is:
 
 1. User clicks `Start Practice`.
 2. User selects or enters:
    - Book/work title.
    - Chapter or passage identifier.
 3. User selects an audio file from disk.
-4. Frontend submits metadata and audio to the backend.
-5. Backend uploads the audio blob to the authenticated user's PDS.
-6. Backend creates an ATProto record referencing the uploaded blob.
-7. Backend adds or updates the corresponding SQLite index row.
-8. Frontend displays the completed recording.
+4. The browser uploads the audio to the user's PDS (`com.atproto.repo.uploadBlob`).
+5. The browser creates a `club.voicebook.recording` record referencing the blob (`com.atproto.repo.createRecord`).
+6. The PDS emits the commit on its firehose; Jetstream relays it; the backend indexes it.
+7. The frontend shows the completed recording, refreshing from the backend once it is indexed.
 
 Native in-browser microphone recording can be added later.
 
@@ -218,11 +220,11 @@ For the MVP, chronological ordering is sufficient.
 
 ## 10. Friends View
 
-The Friends view should show recent practice activity from other known Voicebook users whom the current user follows on Bluesky.
+The Friends view shows recent practice activity from other known Voicebook users whom the current user follows on Bluesky.
 
-For the first version, define a Voicebook "friend" as:
+A Voicebook "friend" is:
 
-> A known Voicebook user whose DID appears in the signed-in user's Bluesky follow graph.
+> A known Voicebook member whose DID appears in the signed-in user's Bluesky follow graph.
 
 No separate Voicebook friend-request system is needed.
 
@@ -240,11 +242,13 @@ Practiced yesterday
 The Left Hand of Darkness — Chapter 7
 ```
 
-The local backend may derive this from:
+Follows are `app.bsky.graph.follow` records in each user's own repository, so no Bluesky AppView is needed. The backend:
 
-- Known Voicebook user DIDs.
-- The current user's Bluesky follow graph.
-- Indexed Voicebook recording records.
+- stores the follows of members, kept current from Jetstream (creates and deletes);
+- answers for a non-member (e.g. someone who signed in but hasn't recorded yet) by fetching their follows live from their PDS;
+- intersects follows with known members and returns their recent recordings.
+
+Follows are public data, but storing members' follow graphs should be disclosed in a privacy policy before production, and deletions must be honored (§19).
 
 ---
 
@@ -300,24 +304,15 @@ The local MVP should prefer a small schema that can evolve later.
 
 ## 12. Blob Handling
 
-The backend should:
+The browser:
 
-1. Receive audio from the frontend.
-2. Upload it using the authenticated user's ATProto session.
-3. Receive the ATProto blob reference.
-4. Create the recording record referencing that blob.
+1. Uploads the audio with the user's OAuth session (`uploadBlob`).
+2. Receives the blob reference.
+3. Creates the recording record referencing that blob.
 
-The application should treat:
+The two steps form one logical operation. If the upload succeeds but record creation fails, the frontend reports the failure clearly and may retry record creation with the same blob reference. An unreferenced blob is eventually garbage-collected by the PDS, so no cleanup is required.
 
-```text
-upload blob + create record
-```
-
-as one logical operation.
-
-If blob upload succeeds but record creation fails, the backend should report the failure clearly and may retry record creation.
-
-For the MVP, sophisticated cleanup of orphaned temporary uploads is not required.
+The PDS may normalize the MIME type (e.g. `audio/ogg` becomes `audio/ogg; codecs=opus`); the record should use the blob reference the PDS returned, unchanged.
 
 ---
 
@@ -348,238 +343,174 @@ The backend may cache handles in SQLite, but code should not use the handle as a
 
 ## 14. ATProto OAuth
 
-Local development should use ATProto's localhost development OAuth support.
+OAuth runs in the browser using Bluesky's maintained client library, `@atproto/oauth-client-browser`.
 
-The backend is responsible for:
+Locally, the app is a **loopback client**: its client ID is an `http://localhost` URL encoding the redirect URI and scopes, and needs no registration or hosted metadata. In production, the app instead hosts a static `client-metadata.json`.
 
-- Beginning the OAuth flow.
-- Handling the callback.
-- Associating the authenticated session with the user's DID.
-- Persisting enough OAuth session state locally to survive backend restarts.
-- Refreshing sessions as required by the ATProto OAuth implementation.
+The browser is responsible for:
 
-OAuth implementation should be isolated behind a backend module so that ATProto library choices can change without affecting the rest of the application.
+- Resolving the user's handle to a DID and PDS.
+- Running the authorization flow (PAR, PKCE, DPoP) against the PDS's authorization server.
+- Storing the session (the DPoP key is non-extractable, kept in IndexedDB).
+- Refreshing tokens.
 
-Suggested Rust abstraction:
+Scopes: request only what Voicebook needs: write access to `club.voicebook.recording` and audio blob uploads, using granular permission scopes where the PDS supports them, falling back to `transition:generic`.
 
-```rust
-trait AtprotoSession {
-    async fn did(&self) -> Result<String>;
-    async fn upload_blob(&self, data: &[u8], mime_type: &str) -> Result<BlobRef>;
-    async fn create_record<T>(&self, collection: &str, record: &T) -> Result<RecordRef>;
-}
-```
+Loopback and other public clients receive shorter-lived refresh tokens than confidential clients. That is acceptable for the MVP.
 
-The exact trait shape can evolve.
+The backend never sees user tokens. It serves only public data, so its API needs no authentication.
 
 ---
 
 ## 15. Rust Backend
 
-Suggested stack:
+Stack:
 
 ```text
 axum
 tokio
-serde
-serde_json
-sqlx
-reqwest
-tower-http
+sqlx (SQLite)
+tokio-tungstenite (Jetstream)
+reqwest (DID resolution, listRecords)
+serde / serde_json
 tracing
 ```
 
-ATProto functionality may come from a suitable Rust community library where practical.
-
-Candidates to evaluate include:
-
-- `jacquard`
-- `atproto-crates`
-- `rsky`
-
-The MVP should not commit deeply to one library until the following spike succeeds:
-
-1. Local OAuth login.
-2. Backend restart with session restoration.
-3. Custom record write.
-4. Record readback.
-5. Blob upload.
+The backend uses no ATProto library: it only resolves DIDs, pages through `listRecords`, and parses Jetstream's JSON events, which plain HTTP and JSON cover.
 
 ### Backend responsibilities
 
-The Rust backend should own:
+The Rust backend owns:
 
-- ATProto OAuth.
-- Session handling.
-- Audio upload.
-- ATProto record creation.
-- ATProto record reads.
-- SQLite indexing.
-- Rebuild/index jobs.
-- Friend/follow relationship queries.
-- API consumed by the TypeScript frontend.
+- Consuming Jetstream (§19).
+- Discovering members and backfilling them from their PDS.
+- SQLite indexing, including the Jetstream cursor.
+- Calendar, recordings and friends-activity queries.
+- Reindex/rebuild.
+
+It does not own OAuth, sessions, audio upload or record creation.
 
 ---
 
 ## 16. TypeScript Frontend
 
-The frontend should be a small single-page application.
+The frontend is a small single-page application, built with Vite.
 
-A framework is optional, but reasonable choices include:
-
-- React
-- Preact
-- Solid
-- Svelte
-
-For the MVP, prefer whichever keeps iteration fastest.
-
-The frontend should not directly own long-lived ATProto credentials.
-
-Suggested responsibility split:
+Responsibilities:
 
 ```text
 Frontend
-  - rendering
-  - forms
-  - file selection
-  - audio playback
-  - calendar UI
+  - OAuth sign-in and session (in the browser)
+  - audio upload and record creation (direct to the PDS)
+  - audio playback (direct from the PDS)
+  - rendering, forms, file selection, calendar UI
+  - queries to the backend for calendar, history and friends
 
 Backend
-  - OAuth/session
-  - ATProto writes
-  - indexing
-  - SQLite
+  - Jetstream consumption
+  - member discovery and backfill
+  - SQLite index
+  - query API
 ```
 
 ---
 
 ## 17. Local API Shape
 
-Possible local backend API:
+The backend API is read-only and unauthenticated:
 
 ```text
-GET  /api/me
-GET  /api/oauth/login
-GET  /api/oauth/callback
-
-GET  /api/practice/calendar
-GET  /api/recordings
-POST /api/recordings
-GET  /api/recordings/:id/audio
-
-GET  /api/friends/activity
+GET  /api/health
+GET  /api/members
+GET  /api/users/:did/recordings?limit&before
+GET  /api/users/:did/calendar?month=YYYY-MM&tzOffsetMinutes
+GET  /api/users/:did/friends/activity?limit&before
 
 POST /api/dev/reindex
-GET  /api/dev/index-status
 ```
 
-This is illustrative rather than final.
+Each recording includes an `audioUrl` pointing at `com.atproto.sync.getBlob` on the author's PDS.
 
 ---
 
 ## 18. SQLite
 
-SQLite is an application index and local persistence layer.
-
-Suggested initial schema:
+SQLite is a reconstructible index plus the Jetstream cursor. Schema (see `backend/migrations/`):
 
 ```sql
-CREATE TABLE users (
+CREATE TABLE members (
     did TEXT PRIMARY KEY,
-    handle TEXT,
-    display_name TEXT,
+    handle TEXT,                         -- mutable display data, never a key
+    pds_url TEXT,
+    active INTEGER NOT NULL DEFAULT 1,   -- 0 while deactivated or taken down
     discovered_at TEXT NOT NULL,
-    last_indexed_at TEXT
+    backfilled_at TEXT
 );
 
 CREATE TABLE recordings (
     uri TEXT PRIMARY KEY,
+    did TEXT NOT NULL REFERENCES members(did) ON DELETE CASCADE,
+    rkey TEXT NOT NULL,
     cid TEXT NOT NULL,
-    did TEXT NOT NULL,
-    created_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,            -- normalized to UTC
     work TEXT NOT NULL,
     chapter TEXT,
     duration_ms INTEGER,
-    blob_cid TEXT,
+    notes TEXT,
+    blob_cid TEXT NOT NULL,
     mime_type TEXT,
     size_bytes INTEGER,
-    indexed_at TEXT NOT NULL,
-    FOREIGN KEY (did) REFERENCES users(did)
+    indexed_at TEXT NOT NULL
 );
 
-CREATE INDEX recordings_by_user_date
-    ON recordings(did, created_at);
-
-CREATE INDEX recordings_by_work
-    ON recordings(work);
-
+-- Keyed by rkey: a delete event carries only the record key.
 CREATE TABLE follows (
-    actor_did TEXT NOT NULL,
+    actor_did TEXT NOT NULL REFERENCES members(did) ON DELETE CASCADE,
+    rkey TEXT NOT NULL,
     subject_did TEXT NOT NULL,
-    indexed_at TEXT NOT NULL,
-    PRIMARY KEY (actor_did, subject_did)
+    PRIMARY KEY (actor_did, rkey)
 );
+
+CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
-Additional OAuth/session tables may be required by the chosen ATProto OAuth implementation.
+A **member** is any account that has written at least one well-formed `club.voicebook.recording` record. Membership is permanent: deleting all recordings does not remove it, since a member with no recordings is indistinguishable from someone who just joined. Only account deletion removes a member.
 
 ---
 
-## 19. Reindexing and Reconstruction
+## 19. Indexing, Reindexing and Reconstruction
 
-The backend must support rebuilding application content indexes from ATProto.
-
-A local developer action should exist to:
+The backend keeps one Jetstream subscription:
 
 ```text
-1. Read known Voicebook DIDs.
-2. Discover each user's current PDS.
-3. Enumerate club.voicebook.recording records.
-4. Rebuild the recordings table.
-5. Refresh cached handles/profile data.
-6. Recompute or refresh social relationships as needed.
+/subscribe?wantedCollections=club.voicebook.recording
+          &wantedCollections=app.bsky.graph.follow
+          &cursor=<stored cursor, or 0>
 ```
 
-The implementation may initially be a development-only CLI command or HTTP endpoint.
+For each event, in one SQLite transaction together with the new cursor:
 
-Example:
+- **Recording create/update:** if the author is not yet a member, add them and backfill their recordings and follows from their PDS via `listRecords`; then upsert the recording.
+- **Recording delete:** delete it.
+- **Follow create/delete:** applied only if the author is a member.
+- **Identity:** refresh a member's handle and PDS from their DID document.
+- **Account:** `deleted` purges the member and their data; other inactive states hide them.
 
-```bash
-cargo run -- reindex
-```
+Jetstream delivery is at-least-once and its cursor is inclusive, so every write is idempotent.
 
-or:
+Backfill on discovery is required, not an optimization: follows usually predate a user's first recording, and are ignored until the user is a member.
 
-```text
-POST /api/dev/reindex
-```
+**Reconstruction:** with no stored cursor, the backend subscribes from cursor 0, so Jetstream replays its archive and the index rebuilds itself. `POST /api/dev/reindex` re-fetches every known member from their PDS.
 
 ---
 
 ## 20. Irreducible Local State
 
-The MVP should identify exactly what cannot be reconstructed from public ATProto data.
+Nothing in SQLite is irreducible: members, recordings and follows are all rebuilt from Jetstream replay plus PDS backfill. The only local state the backend needs is configuration (PLC and Jetstream URLs).
 
-Likely examples:
+OAuth sessions live in each user's browser, not on the server.
 
-- The list of users considered members of the Voicebook community.
-- OAuth session/token state.
-- Any local-only development configuration.
-- Future moderation/admin state.
-
-The project should keep this set intentionally small.
-
-The known-user seed should use DIDs.
-
-Example:
-
-```text
-did:plc:abc...
-did:plc:def...
-did:plc:ghi...
-```
+This relies on Jetstream retaining history back to Voicebook's first recording. If a production Jetstream has shorter retention, a list of member DIDs becomes irreducible state (backfill alone can rebuild everything else); revisit before production.
 
 ---
 
@@ -587,21 +518,19 @@ did:plc:ghi...
 
 A core MVP acceptance test is:
 
-> Delete the SQLite content index and successfully rebuild it from ATProto.
+> Delete the SQLite index and successfully rebuild it from ATProto.
 
-Suggested test procedure:
+Procedure:
 
 1. Create several test recordings across two or more ATProto accounts.
 2. Verify the UI displays them.
-3. Stop the backend.
-4. Delete the reconstructible SQLite tables or the entire disposable index DB.
-5. Start with only the known-user seed and required OAuth/session state.
-6. Run reindex.
-7. Verify all recordings reappear.
-8. Verify calendar days match.
-9. Verify Friends activity matches.
+3. Snapshot the API's responses (members, recordings, calendars, friends activity).
+4. Stop the backend.
+5. Delete the SQLite database.
+6. Start the backend; it replays Jetstream from cursor 0.
+7. Verify the API responses match the snapshot exactly.
 
-This test validates the architecture.
+This test validates the architecture. It passed against the local network on 2026-10-05.
 
 ---
 
@@ -609,44 +538,34 @@ This test validates the architecture.
 
 Practice days should initially be derived from recordings rather than stored separately.
 
-Conceptually:
+Timestamps are stored in UTC. The viewer's calendar day depends on their time zone, so the calendar query takes the viewer's UTC offset and shifts timestamps before grouping:
 
 ```sql
 SELECT
-    date(created_at) AS practice_date,
+    date(created_at, :offset) AS practice_date,      -- e.g. '-420 minutes'
     COUNT(*) AS recording_count,
     SUM(duration_ms) AS duration_ms
 FROM recordings
-WHERE did = ?
-GROUP BY date(created_at)
-ORDER BY practice_date;
+WHERE did = :did AND strftime('%Y-%m', created_at, :offset) = :month
+GROUP BY 1
+ORDER BY 1;
 ```
 
-Timezone handling should be explicitly defined before production.
-
-For local MVP development, timestamps should be stored in UTC, while the frontend may render dates using the user's local timezone.
+A fixed offset is wrong across daylight-saving changes within a month; using IANA time zone names is a pre-production decision.
 
 ---
 
 ## 23. Audio Playback
 
-The frontend should be able to play a user's recording.
-
-Implementation options include:
-
-1. Backend retrieves/proxies the ATProto blob.
-2. Backend generates or exposes a suitable PDS blob URL where safe.
-3. Frontend requests audio through a backend endpoint.
-
-For the MVP, prioritize correctness and simplicity over CDN efficiency.
-
-A backend playback endpoint is acceptable:
+The browser plays recordings directly from the author's PDS:
 
 ```text
-GET /api/recordings/:id/audio
+<audio src="{pds}/xrpc/com.atproto.sync.getBlob?did={did}&cid={blob cid}">
 ```
 
-The backend may stream the blob from the user's PDS.
+`getBlob` is public, so playback needs no session, and the backend never proxies audio. The backend supplies the URL as `audioUrl`.
+
+PDSes do not honor HTTP Range requests, so a browser cannot seek in a streamed Ogg file or determine its duration. The player therefore fetches the whole blob into an object URL on first play. Practice recordings are small enough for this; revisit if long recordings or a CDN change the picture.
 
 ---
 
@@ -707,28 +626,26 @@ Production metrics and alerting are out of scope for this document.
 
 ## 26. Repository Layout
 
-Suggested monorepo:
-
 ```text
-voicebook/
+voicebook.club/
 ├── README.md
 ├── docs/
 │   └── mvp-local.md
+├── dev/
+│   └── localnet/           local PLC, PDS and Jetstream (Docker Compose)
 ├── backend/
 │   ├── Cargo.toml
 │   ├── migrations/
 │   └── src/
 │       ├── main.rs
-│       ├── api/
-│       ├── auth/
-│       ├── atproto/
-│       ├── db/
-│       ├── indexer/
-│       └── models/
+│       ├── api.rs          query API
+│       ├── atproto.rs      DID resolution, listRecords
+│       ├── config.rs
+│       ├── indexer.rs      event application, backfill
+│       └── jetstream.rs    subscription and reconnects
 ├── frontend/
 │   ├── package.json
-│   ├── src/
-│   └── public/
+│   └── src/
 └── lexicons/
     └── club.voicebook.recording.json
 ```
@@ -737,63 +654,43 @@ voicebook/
 
 ## 27. Suggested Development Order
 
-### Milestone 1 — Local Rust Server
+### Milestone 1 — Local ATmosphere ✅
 
-- Axum starts.
-- SQLite opens.
-- Frontend can call `/api/health`.
+- PLC, PDS and Jetstream running locally in Docker.
+- Seeded test accounts and follows.
 
-### Milestone 2 — ATProto Login
+### Milestone 2 — Backend Indexer ✅
 
-- Login with a real Bluesky/ATProto account.
-- Callback succeeds on localhost.
-- DID is displayed in the frontend.
-- Session survives backend restart.
+- Jetstream subscription with a persisted cursor.
+- Member discovery and backfill.
+- Recordings, calendar and friends-activity queries.
 
-### Milestone 3 — Metadata-Only Test Record
+### Milestone 3 — Destructive Rebuild Test ✅
 
-- Define the Voicebook Lexicon.
-- Create a test record.
-- Read it back.
-- Index it into SQLite.
+- Delete SQLite, restart, confirm identical API responses.
 
-### Milestone 4 — Audio Blob
+### Milestone 4 — Browser Login ✅
 
-- Upload one audio file.
-- Create a recording record referencing the blob.
-- Play it back.
+- OAuth sign-in against the local PDS.
+- DID and handle displayed.
+- Session survives a page reload.
 
-### Milestone 5 — Recording History
+### Milestone 5 — Upload ✅
 
-- Show recordings chronologically.
-- Show work/chapter/date.
-- Playback works.
+- Upload an audio file and create a recording record from the browser.
+- Recording appears via the backend.
+- Playback from the PDS.
 
-### Milestone 6 — Calendar
+### Milestone 6 — Views ✅
 
-- Derive practice days from recording timestamps.
-- Render current month.
-- Clicking a day shows that day's recordings.
+- Practice view with calendar; clicking a day shows its recordings.
+- Recordings view.
+- Friends view.
 
-### Milestone 7 — Multiple Users
+### Milestone 7 — Real Network Smoke Test
 
-- Add at least one additional test user/DID.
-- Index both users.
-- Display current user's own data correctly.
-
-### Milestone 8 — Friends Activity
-
-- Read Bluesky follows.
-- Intersect follows with known Voicebook DIDs.
-- Show recent practice activity.
-
-### Milestone 9 — Destructive Rebuild Test
-
-- Delete reconstructible SQLite state.
-- Rebuild from known DIDs.
-- Confirm UI returns to the same user-visible state.
-
-At that point, the local MVP architecture is considered proven.
+- Sign in with real Bluesky accounts.
+- Backend against a public Jetstream and `plc.directory` (requires TLS in the backend's HTTP clients).
 
 ---
 
@@ -801,21 +698,22 @@ At that point, the local MVP architecture is considered proven.
 
 The local MVP is complete when all of the following are true:
 
-- [ ] Rust backend runs locally.
-- [ ] TypeScript frontend runs locally.
-- [ ] User can authenticate using ATProto OAuth.
-- [ ] OAuth session can survive backend restart.
-- [ ] User can upload an audio recording.
-- [ ] Audio is stored as an ATProto blob.
-- [ ] Recording metadata is stored in a custom ATProto record.
-- [ ] Recording appears in local SQLite index.
-- [ ] User can list and replay recordings.
-- [ ] Calendar shows days with recordings.
-- [ ] At least two ATProto users can be indexed.
-- [ ] Friend activity can be derived from Bluesky follows and known Voicebook users.
-- [ ] SQLite recording indexes can be deleted and reconstructed from ATProto.
-- [ ] Handles are treated as mutable; DIDs are canonical.
-- [ ] No production infrastructure is required.
+- [x] Local ATProto network (PLC, PDS, Jetstream) runs in Docker.
+- [x] Rust backend runs locally.
+- [x] TypeScript frontend runs locally.
+- [x] User can authenticate using ATProto OAuth in the browser.
+- [x] Session survives a page reload.
+- [x] User can upload an audio recording.
+- [x] Audio is stored as an ATProto blob.
+- [x] Recording metadata is stored in a custom ATProto record.
+- [x] Recordings are indexed into SQLite from Jetstream.
+- [x] User can list and replay recordings.
+- [x] Calendar shows days with recordings.
+- [x] At least two ATProto users can be indexed.
+- [x] Friend activity is derived from Bluesky follows and known members.
+- [x] The SQLite index can be deleted and reconstructed from ATProto.
+- [x] Handles are treated as mutable; DIDs are canonical.
+- [x] No production infrastructure is required.
 
 ---
 
@@ -834,10 +732,11 @@ These should be revisited after the local MVP works:
 - Public vs private activity controls.
 - Recording visibility model.
 - App-level moderation.
-- Feed/event-stream indexing instead of per-user crawling.
 - PDS blob limits and fallback object storage.
 - CDN/caching.
 - Native browser audio recording.
+- Jetstream retention vs. member-list persistence (§20).
+- Scaling the follow subscription beyond what one filtered stream handles.
 - Mobile UX.
 - Streak/goal semantics.
 - Multiple recordings per practice session.
@@ -867,3 +766,19 @@ simple TypeScript interface
 ```
 
 If those pieces work cleanly together locally, production hardening can follow without substantially changing the application's core data model.
+
+---
+
+## 31. Local ATmosphere
+
+Development runs against a local ATProto network in `dev/localnet/`, all unmodified upstream software:
+
+| Port | Service | Source |
+|---|---|---|
+| 2582 | PLC directory | `did-method-plc`, built from a pinned commit, with Postgres |
+| 2583 | PDS | official `ghcr.io/bluesky-social/pds` image |
+| 6008 | Jetstream | official `ghcr.io/bluesky-social/jetstream` image, reading the PDS firehose |
+
+Accounts use `.test` handles. The PDS signs PLC operations with a rotation key generated into a gitignored `.env`, which must stay paired with the Docker volumes.
+
+The npm-published PLC server (`@did-plc/server` 0.0.1, from 2023) emits a legacy DID-document key format that current tools, including Jetstream, reject; the upstream source emits `Multikey` and is used instead.
