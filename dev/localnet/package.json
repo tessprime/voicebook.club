@@ -1,0 +1,11 @@
+{
+  "name": "voicebook-localnet",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node localnet.mjs"
+  },
+  "dependencies": {
+    "@atproto/dev-env": "^0.6.10"
+  }
+}
