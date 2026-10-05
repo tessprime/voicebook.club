@@ -15,7 +15,7 @@ specification.
 
 Early prototype, local development only.
 
-- [x] Local ATProto network (PLC + PDS) with seeded test accounts
+- [x] Local ATProto network (PLC + PDS + Jetstream) with seeded test accounts
 - [x] Spike confirming the required ATProto calls work locally
 - [ ] Rust backend (axum + SQLite)
 - [ ] TypeScript frontend
@@ -25,30 +25,38 @@ Early prototype, local development only.
 
 ```text
 docs/                    MVP specification
-dev/localnet/            local PLC directory + PDS for development
+dev/localnet/            local PLC, PDS and Jetstream (Docker Compose)
 ```
 
 Planned: `backend/` (Rust), `frontend/` (TypeScript), `lexicons/`.
 
 ## Local development
 
-Development runs entirely against a local ATProto network; no Bluesky account
-is needed.
+Development runs entirely against a local ATProto network (PLC directory, PDS
+and Jetstream in Docker); no Bluesky account is needed.
 
-Requirements: [nvm](https://github.com/nvm-sh/nvm) (or any Node 22+; the repo
-pins 24 via `.nvmrc`), plus `curl`, `jq` and `ffmpeg` for the spike script.
+Requirements: Docker with the Compose plugin (`sudo apt install
+docker-compose-v2` on Ubuntu), plus `curl`, `jq`, `openssl` and `xxd`;
+`ffmpeg` for the spike script.
 
 ```bash
-source ~/.nvm/nvm.sh   # only if nvm isn't loaded by your shell startup
 cd dev/localnet
-nvm install            # first time only; installs the version in .nvmrc
-nvm use
-npm install
-npm start              # PLC on :2582, PDS on :2583; Ctrl-C to stop
-./spike.sh             # in another shell: upload, record, list, fetch, follows
+./init.sh                 # first time only: generates .env with fresh secrets
+docker compose up -d      # PLC :2582, PDS :2583, Jetstream :6008
+./seed.sh                 # test accounts and follows; safe to re-run
+./spike.sh                # upload, record, list, fetch, follows
 ```
 
 Test accounts `alice.test`, `bob.test`, `carol.test` and `dave.test` share the
-password `password`. The network is ephemeral: each restart creates new DIDs,
-written to `dev/localnet/localnet.json`. See
-[`dev/localnet/README.md`](dev/localnet/README.md) for details.
+password `password`. State persists across restarts; `./reset.sh` wipes it.
+See [`dev/localnet/README.md`](dev/localnet/README.md) for details.
+
+### Node
+
+The frontend needs Node 22+. The repo pins 24 in `.nvmrc`:
+
+```bash
+source ~/.nvm/nvm.sh   # only if nvm isn't loaded by your shell startup
+nvm install            # first time only; installs the version in .nvmrc
+nvm use
+```
