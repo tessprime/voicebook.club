@@ -1,0 +1,6 @@
+{
+  "bind": "127.0.0.1:3000",
+  "database": "data/production.sqlite",
+  "plcUrl": "https://plc.directory",
+  "jetstreamUrl": "wss://jetstream.us-east.bsky.network"
+}

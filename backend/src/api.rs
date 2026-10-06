@@ -13,6 +13,7 @@ use tracing::error;
 
 use crate::atproto;
 use crate::indexer::Indexer;
+use crate::jetstream;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -49,8 +50,11 @@ impl IntoResponse for ApiError {
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
 async fn health(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
-    let cursor = state.indexer.cursor().await?;
-    Ok(Json(json!({ "ok": true, "jetstreamCursor": cursor })))
+    let mut cursors = serde_json::Map::new();
+    for subscription in [jetstream::RECORDINGS, jetstream::FOLLOWS] {
+        cursors.insert(subscription.name.into(), json!(state.indexer.cursor(&subscription.cursor_key()).await?));
+    }
+    Ok(Json(json!({ "ok": true, "jetstreamCursors": cursors })))
 }
 
 #[derive(Serialize, FromRow)]

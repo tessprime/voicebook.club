@@ -33,6 +33,7 @@ docs/                    MVP specification
 dev/localnet/            local PLC, PDS and Jetstream (Docker Compose)
 backend/                 Rust indexer and API (axum, sqlx/SQLite)
 frontend/                React + TypeScript app (Vite)
+scripts/                 maintenance scripts
 lexicons/                club.voicebook.recording schema
 ```
 
@@ -62,15 +63,15 @@ See [`dev/localnet/README.md`](dev/localnet/README.md) for details.
 
 ```bash
 cd backend
-cargo run                 # API on 127.0.0.1:3000
+cargo run                                  # environments/development.json: local network, API on 127.0.0.1:3000
+cargo run -- --environment production      # environments/production.json: real Bluesky network
 cargo test
 ```
 
-Configuration is by environment variable; the defaults target the local
-network: `VOICEBOOK_BIND` (`127.0.0.1:3000`), `VOICEBOOK_DATABASE_URL`
-(`sqlite://data/voicebook.sqlite`), `VOICEBOOK_PLC_URL`
-(`http://localhost:2582`), `VOICEBOOK_JETSTREAM_URL` (`ws://localhost:6008`).
-`RUST_LOG` sets log levels.
+Settings live in `backend/environments/<name>.json` (`bind`, `database`,
+`plcUrl`, `jetstreamUrl`); `--config <path>` loads any other file. `RUST_LOG`
+sets log levels. Each environment has its own SQLite file under
+`backend/data/`.
 
 | Endpoint | Returns |
 |---|---|
@@ -84,9 +85,16 @@ network: `VOICEBOOK_BIND` (`127.0.0.1:3000`), `VOICEBOOK_DATABASE_URL`
 Recordings include an `audioUrl` that the browser plays straight from the
 author's PDS.
 
+The backend keeps two Jetstream subscriptions: Voicebook recordings, replayed
+from the start of Jetstream's archive when there's no stored cursor, and
+follows, which only ever start live (members' earlier follows come from the
+backfill when they're discovered).
+
 To rebuild the index from scratch, stop the backend, delete
-`backend/data/voicebook.sqlite*` and start it again: with no stored cursor it
-replays Jetstream from the beginning and backfills each member from their PDS.
+`backend/data/<environment>.sqlite*` and start it again. Locally this
+reproduces the index exactly. Against the real network it only recovers
+members whose recordings fall within the public Jetstream's lookback window
+(see `docs/mvp-local.md` §20).
 
 ### Frontend
 
@@ -104,3 +112,19 @@ npm run test:e2e       # Playwright, against the running localnet and backend
 
 Open `http://127.0.0.1:5173`, not `localhost:5173`: ATProto's OAuth loopback
 redirects must use the IP. See [`frontend/README.md`](frontend/README.md).
+
+### Scripts
+
+`scripts/voicebook_records.py` lists or deletes an account's Voicebook
+recordings (Python 3, standard library only):
+
+```bash
+scripts/voicebook_records.py alice.bsky.social                     # list (public, no login)
+scripts/voicebook_records.py alice.bsky.social --delete <id>       # delete one, by record key
+scripts/voicebook_records.py alice.bsky.social --clear             # delete all
+scripts/voicebook_records.py alice.test --env development --clear  # against the local network
+```
+
+Deleting prompts for the account's password (an app password for real
+Bluesky accounts) and asks for confirmation; `--yes` skips the confirmation,
+and `VOICEBOOK_PASSWORD` supplies the password non-interactively.

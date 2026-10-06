@@ -1,0 +1,6 @@
+{
+  "bind": "127.0.0.1:3000",
+  "database": "data/development.sqlite",
+  "plcUrl": "http://localhost:2582",
+  "jetstreamUrl": "ws://localhost:6008"
+}

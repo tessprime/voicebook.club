@@ -4,8 +4,6 @@ mod config;
 mod indexer;
 mod jetstream;
 
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use tower_http::cors::CorsLayer;
@@ -21,9 +19,13 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()))
         .init();
-    let config = Config::from_env()?;
+    // reqwest and tokio-tungstenite each enable a different rustls crypto
+    // backend; with both present rustls needs one chosen explicitly.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = Config::from_args()?;
 
-    let options = SqliteConnectOptions::from_str(&config.database_url)?
+    let options = SqliteConnectOptions::new()
+        .filename(&config.database)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true);
@@ -34,7 +36,9 @@ async fn main() -> Result<()> {
     sqlx::migrate!().run(&db).await?;
 
     let indexer = Indexer::new(db.clone(), atproto::Client::new(&config.plc_url));
-    tokio::spawn(jetstream::run(config.jetstream_url.clone(), indexer.clone()));
+    for subscription in [jetstream::RECORDINGS, jetstream::FOLLOWS] {
+        tokio::spawn(jetstream::run(config.jetstream_url.clone(), indexer.clone(), subscription));
+    }
 
     // Local development only: the frontend runs on its own dev-server port.
     let app = api::router(api::AppState { db, indexer })

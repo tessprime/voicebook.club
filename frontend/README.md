@@ -8,11 +8,13 @@ PDS, and reads calendars, history and friends' activity from the backend.
 nvm use
 npm install
 npm run dev          # http://127.0.0.1:5173 (not "localhost": OAuth loopback redirects need the IP)
+npm run dev:production  # same, but against the real Bluesky network (.env.production)
 npm run test:e2e     # Playwright; needs dev/localnet up and seeded, and the backend running
 ```
 
 `.env.development` points identity resolution at the local network
-(`VITE_PLC_URL`, `VITE_HANDLE_RESOLVER`). `/api` is proxied to the backend on
+(`VITE_PLC_URL`, `VITE_HANDLE_RESOLVER`); `.env.production` at the real
+network. Pair each with the backend environment of the same name. `/api` is proxied to the backend on
 `127.0.0.1:3000`.
 
 Notes:

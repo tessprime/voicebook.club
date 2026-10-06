@@ -11,8 +11,6 @@ use tracing::{info, warn};
 
 use crate::atproto::{self, FOLLOW, RECORDING, Record};
 
-const CURSOR_KEY: &str = "jetstream_cursor";
-
 #[derive(Debug, Deserialize)]
 pub struct Event {
     pub did: String,
@@ -93,24 +91,38 @@ impl Indexer {
         Self { db, client }
     }
 
-    pub async fn cursor(&self) -> Result<Option<i64>> {
+    /// The last event processed by a subscription, stored under `cursor_key`.
+    pub async fn cursor(&self, cursor_key: &str) -> Result<Option<i64>> {
         let value: Option<String> = sqlx::query_scalar("SELECT value FROM state WHERE key = ?")
-            .bind(CURSOR_KEY)
+            .bind(cursor_key)
             .fetch_optional(&self.db)
             .await?;
         Ok(value.and_then(|v| v.parse().ok()))
     }
 
-    /// Applies one event and advances the cursor in the same transaction.
-    pub async fn handle(&self, event: &Event) -> Result<()> {
-        // Network work happens before the transaction opens.
+    /// Applies one event and advances `cursor_key` in the same transaction.
+    pub async fn handle(&self, event: &Event, cursor_key: &str) -> Result<()> {
+        // Network work happens before the transaction opens, so the write lock
+        // is never held across an HTTP request.
         let snapshot = if self.is_new_member(event).await? {
             Some(self.fetch_snapshot(&event.did).await)
         } else {
             None
         };
+        // An identity event may mean the DID document changed (e.g. a PDS move).
+        let pds_url = if event.kind == "identity" && self.is_known_member(&event.did).await? {
+            match self.client.resolve(&event.did).await {
+                Ok(identity) => Some(identity.pds_url),
+                Err(err) => {
+                    warn!(did = %event.did, error = %err, "re-resolving identity failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.begin_write().await?;
         if let Some(snapshot) = snapshot {
             info!(did = %event.did, recordings = snapshot.recordings.len(), follows = snapshot.follows.len(), "new member");
             apply_snapshot(&mut tx, &event.did, &snapshot).await?;
@@ -124,14 +136,6 @@ impl Indexer {
             "identity" => {
                 if is_member(&mut tx, &event.did).await? {
                     let handle = event.identity.as_ref().and_then(|i| i.handle.clone());
-                    // The DID document may have changed too (e.g. a PDS move).
-                    let pds_url = match self.client.resolve(&event.did).await {
-                        Ok(identity) => Some(identity.pds_url),
-                        Err(err) => {
-                            warn!(did = %event.did, error = %err, "re-resolving identity failed");
-                            None
-                        }
-                    };
                     sqlx::query(
                         "UPDATE members SET handle = coalesce(?, handle), pds_url = coalesce(?, pds_url) WHERE did = ?",
                     )
@@ -166,7 +170,7 @@ impl Indexer {
         }
         if let Some(cursor) = event.cursor {
             sqlx::query("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
-                .bind(CURSOR_KEY)
+                .bind(cursor_key)
                 .bind(cursor.to_string())
                 .execute(&mut *tx)
                 .await?;
@@ -181,7 +185,7 @@ impl Indexer {
         let dids: Vec<String> = sqlx::query_scalar("SELECT did FROM members").fetch_all(&self.db).await?;
         for did in &dids {
             let snapshot = self.fetch_snapshot(did).await;
-            let mut tx = self.db.begin().await?;
+            let mut tx = self.begin_write().await?;
             apply_snapshot(&mut tx, did, &snapshot).await?;
             tx.commit().await?;
         }
@@ -211,6 +215,18 @@ impl Indexer {
             .collect())
     }
 
+    /// Starts a transaction that takes SQLite's write lock up front. A deferred
+    /// transaction that reads and then writes fails immediately with
+    /// SQLITE_BUSY when another connection is writing, rather than waiting.
+    async fn begin_write(&self) -> Result<Transaction<'static, Sqlite>> {
+        Ok(self.db.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
+    async fn is_known_member(&self, did: &str) -> Result<bool> {
+        let mut conn = self.db.acquire().await?;
+        is_member(&mut conn, did).await
+    }
+
     /// A recording create from an account not yet in `members`.
     async fn is_new_member(&self, event: &Event) -> Result<bool> {
         let Some(commit) = &event.commit else { return Ok(false) };
@@ -224,8 +240,7 @@ impl Indexer {
         if !valid {
             return Ok(false);
         }
-        let mut conn = self.db.acquire().await?;
-        Ok(!is_member(&mut conn, &event.did).await?)
+        Ok(!self.is_known_member(&event.did).await?)
     }
 
     /// Fetches a member's identity, recordings and follows. Failures are
@@ -398,6 +413,7 @@ mod tests {
 
     use super::*;
 
+    const CURSOR: &str = "test_cursor";
     const ALICE: &str = "did:plc:alice";
     const BOB: &str = "did:plc:bob";
 
@@ -448,50 +464,50 @@ mod tests {
     async fn first_recording_makes_a_member_and_replay_is_idempotent() {
         let ix = indexer().await;
         let create = recording(ALICE, 7, "r1", "2026-10-05T09:00:00+02:00");
-        ix.handle(&create).await.unwrap();
-        ix.handle(&create).await.unwrap();
+        ix.handle(&create, CURSOR).await.unwrap();
+        ix.handle(&create, CURSOR).await.unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 1);
         assert_eq!(count(&ix, "SELECT count(*) FROM recordings").await, 1);
         let created_at: String = sqlx::query_scalar("SELECT created_at FROM recordings").fetch_one(&ix.db).await.unwrap();
         assert_eq!(created_at, "2026-10-05T07:00:00.000Z", "normalized to UTC");
-        assert_eq!(ix.cursor().await.unwrap(), Some(7));
+        assert_eq!(ix.cursor(CURSOR).await.unwrap(), Some(7));
     }
 
     #[tokio::test]
     async fn follows_are_kept_only_for_members() {
         let ix = indexer().await;
-        ix.handle(&follow(BOB, 1, "create", "f1", ALICE)).await.unwrap();
+        ix.handle(&follow(BOB, 1, "create", "f1", ALICE), CURSOR).await.unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 0, "bob isn't a member");
 
-        ix.handle(&recording(ALICE, 2, "r1", "2026-10-05T09:00:00Z")).await.unwrap();
-        ix.handle(&follow(ALICE, 3, "create", "f2", BOB)).await.unwrap();
+        ix.handle(&recording(ALICE, 2, "r1", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap();
+        ix.handle(&follow(ALICE, 3, "create", "f2", BOB), CURSOR).await.unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 1);
 
-        ix.handle(&follow(ALICE, 4, "delete", "f2", "")).await.unwrap();
+        ix.handle(&follow(ALICE, 4, "delete", "f2", ""), CURSOR).await.unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 0);
     }
 
     #[tokio::test]
     async fn recording_delete_and_account_deletion() {
         let ix = indexer().await;
-        ix.handle(&recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z")).await.unwrap();
-        ix.handle(&recording(ALICE, 2, "r2", "2026-10-06T09:00:00Z")).await.unwrap();
-        ix.handle(&follow(ALICE, 3, "create", "f1", BOB)).await.unwrap();
+        ix.handle(&recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap();
+        ix.handle(&recording(ALICE, 2, "r2", "2026-10-06T09:00:00Z"), CURSOR).await.unwrap();
+        ix.handle(&follow(ALICE, 3, "create", "f1", BOB), CURSOR).await.unwrap();
 
         ix.handle(&event(json!({
             "did": ALICE, "cursor": 4, "kind": "commit",
             "commit": {"operation": "delete", "collection": RECORDING, "rkey": "r1"}
-        })))
+        })), CURSOR)
         .await
         .unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM recordings").await, 1);
 
-        ix.handle(&event(json!({"did": ALICE, "cursor": 5, "kind": "account", "account": {"active": false, "status": "deactivated"}})))
+        ix.handle(&event(json!({"did": ALICE, "cursor": 5, "kind": "account", "account": {"active": false, "status": "deactivated"}})), CURSOR)
             .await
             .unwrap();
         assert_eq!(count(&ix, "SELECT active FROM members").await, 0);
 
-        ix.handle(&event(json!({"did": ALICE, "cursor": 6, "kind": "account", "account": {"active": false, "status": "deleted"}})))
+        ix.handle(&event(json!({"did": ALICE, "cursor": 6, "kind": "account", "account": {"active": false, "status": "deleted"}})), CURSOR)
             .await
             .unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 0);
@@ -502,15 +518,54 @@ mod tests {
     #[tokio::test]
     async fn invalid_records_are_skipped_but_advance_the_cursor() {
         let ix = indexer().await;
-        ix.handle(&recording(ALICE, 1, "r1", "not a date")).await.unwrap();
+        ix.handle(&recording(ALICE, 1, "r1", "not a date"), CURSOR).await.unwrap();
         ix.handle(&event(json!({
             "did": ALICE, "cursor": 2, "kind": "commit",
             "commit": {"operation": "create", "collection": RECORDING, "rkey": "r2", "cid": "bafy", "record": {"work": "no audio"}}
-        })))
+        })), CURSOR)
         .await
         .unwrap();
         assert_eq!(count(&ix, "SELECT count(*) FROM recordings").await, 0);
         assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 1, "a well-formed record with a bad date still counts");
-        assert_eq!(ix.cursor().await.unwrap(), Some(2));
+        assert_eq!(ix.cursor(CURSOR).await.unwrap(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn concurrent_subscriptions_do_not_hit_sqlite_busy() {
+        // A file database with several connections, like the real backend;
+        // an in-memory database can't show lock contention.
+        let path = std::env::temp_dir().join(format!("voicebook-test-{}.sqlite", std::process::id()));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .foreign_keys(true);
+        let db = SqlitePoolOptions::new().max_connections(4).connect_with(options).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let ix = Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"));
+        ix.handle(&recording(ALICE, 1, "r0", "2026-10-05T09:00:00Z"), "recordings").await.unwrap();
+
+        let recordings = {
+            let ix = ix.clone();
+            tokio::spawn(async move {
+                for i in 0..200 {
+                    ix.handle(&recording(ALICE, i + 2, &format!("r{i}"), "2026-10-05T09:00:00Z"), "recordings").await.unwrap();
+                }
+            })
+        };
+        let follows = {
+            let ix = ix.clone();
+            tokio::spawn(async move {
+                for i in 0..200 {
+                    ix.handle(&follow(ALICE, i, "create", &format!("f{i}"), BOB), "follows").await.unwrap();
+                }
+            })
+        };
+        recordings.await.unwrap();
+        follows.await.unwrap();
+        assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 200);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 }

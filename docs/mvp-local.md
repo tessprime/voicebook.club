@@ -372,6 +372,7 @@ tokio
 sqlx (SQLite)
 tokio-tungstenite (Jetstream)
 reqwest (DID resolution, listRecords)
+rustls (TLS for both clients)
 serde / serde_json
 tracing
 ```
@@ -480,13 +481,14 @@ A **member** is any account that has written at least one well-formed `club.voic
 
 ## 19. Indexing, Reindexing and Reconstruction
 
-The backend keeps one Jetstream subscription:
+The backend keeps two Jetstream subscriptions, each with its own stored cursor:
 
 ```text
-/subscribe?wantedCollections=club.voicebook.recording
-          &wantedCollections=app.bsky.graph.follow
-          &cursor=<stored cursor, or 0>
+recordings: /subscribe?wantedCollections=club.voicebook.recording&cursor=<stored, or 0>
+follows:    /subscribe?wantedCollections=app.bsky.graph.follow[&cursor=<stored>]
 ```
+
+Voicebook records are rare, so the recordings subscription replays Jetstream's archive when it has no cursor. Follows are network-wide and enormous, so that subscription only ever starts live; members' earlier follows come from the backfill on discovery.
 
 For each event, in one SQLite transaction together with the new cursor:
 
@@ -498,9 +500,11 @@ For each event, in one SQLite transaction together with the new cursor:
 
 Jetstream delivery is at-least-once and its cursor is inclusive, so every write is idempotent.
 
+The two subscriptions write concurrently, so write transactions start with `BEGIN IMMEDIATE`: a deferred SQLite transaction that reads and then writes fails at once with `SQLITE_BUSY` when another connection holds the write lock, rather than waiting. Network calls (backfill, DID resolution) happen before the transaction opens.
+
 Backfill on discovery is required, not an optimization: follows usually predate a user's first recording, and are ignored until the user is a member.
 
-**Reconstruction:** with no stored cursor, the backend subscribes from cursor 0, so Jetstream replays its archive and the index rebuilds itself. `POST /api/dev/reindex` re-fetches every known member from their PDS.
+**Reconstruction:** with no stored cursor, the recordings subscription starts from cursor 0, so Jetstream replays its archive and the index rebuilds itself. `POST /api/dev/reindex` re-fetches every known member from their PDS.
 
 ---
 
@@ -510,7 +514,7 @@ Nothing in SQLite is irreducible: members, recordings and follows are all rebuil
 
 OAuth sessions live in each user's browser, not on the server.
 
-This relies on Jetstream retaining history back to Voicebook's first recording. If a production Jetstream has shorter retention, a list of member DIDs becomes irreducible state (backfill alone can rebuild everything else); revisit before production.
+This relies on Jetstream retaining history back to Voicebook's first recording. That holds for the local Jetstream, which has seen everything. The public Jetstream instances only keep "a bounded lookback window", so in production a list of member DIDs becomes irreducible state (backfill alone can rebuild everything else from it). Persisting that list is a pre-production task.
 
 ---
 
@@ -690,7 +694,7 @@ voicebook.club/
 ### Milestone 7 — Real Network Smoke Test
 
 - Sign in with real Bluesky accounts.
-- Backend against a public Jetstream and `plc.directory` (requires TLS in the backend's HTTP clients).
+- Backend against a public Jetstream and `plc.directory` (`--environment production`).
 
 ---
 
@@ -769,7 +773,9 @@ If those pieces work cleanly together locally, production hardening can follow w
 
 ---
 
-## 31. Local ATmosphere
+## 31. Local ATmosphere and Environments
+
+The backend reads its settings from `backend/environments/<name>.json`: `development.json` targets the local network below, `production.json` the real Bluesky network (`plc.directory`, a public Jetstream). Each uses its own SQLite file.
 
 Development runs against a local ATProto network in `dev/localnet/`, all unmodified upstream software:
 
