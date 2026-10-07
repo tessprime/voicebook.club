@@ -26,6 +26,29 @@ test.beforeAll(async ({ browser }, testInfo) => {
   }
 })
 
+// Content-Security-Policy violations on our origin fail the test. Recorded
+// in sessionStorage, which survives the OAuth round trip to the PDS. Only
+// meaningful when the backend serves the frontend (E2E_BASE_URL): Vite's dev
+// server sends no CSP.
+test.beforeEach(async ({ page }, testInfo) => {
+  const origin = new URL(testInfo.project.use.baseURL!).origin
+  await page.addInitScript((appOrigin) => {
+    if (window.location.origin !== appOrigin) return
+    document.addEventListener('securitypolicyviolation', (e) => {
+      const seen = JSON.parse(sessionStorage.getItem('csp-violations') ?? '[]')
+      seen.push(`${e.effectiveDirective} blocked ${e.blockedURI || '(inline)'}`)
+      sessionStorage.setItem('csp-violations', JSON.stringify(seen))
+    })
+  }, origin)
+})
+
+test.afterEach(async ({ page }, testInfo) => {
+  const origin = new URL(testInfo.project.use.baseURL!).origin
+  if (page.isClosed() || !page.url().startsWith(origin)) return
+  const violations = await page.evaluate(() => JSON.parse(sessionStorage.getItem('csp-violations') ?? '[]'))
+  expect(violations, 'Content-Security-Policy violations').toEqual([])
+})
+
 async function signIn(page: Page, handle: string) {
   await page.goto('/')
   await page.getByLabel('Your Bluesky handle').fill(handle)
@@ -234,4 +257,36 @@ test('a lost backend session is renewed transparently', async ({ page, context }
   await renewed
   await expect(page.locator('.recording').first()).toBeVisible()
   await expect(page.locator('.error')).toHaveCount(0)
+})
+
+test('security headers are sent', async ({ request }) => {
+  test.skip(!process.env.E2E_BASE_URL, 'the backend serves the frontend only in the image test (E2E_BASE_URL)')
+  const page = await request.get('/')
+  const csp = page.headers()['content-security-policy']
+  expect(csp).toContain("script-src 'self'")
+  expect(csp).toContain("frame-ancestors 'none'")
+  expect(page.headers()['x-content-type-options']).toBe('nosniff')
+  expect(page.headers()['referrer-policy']).toBe('same-origin')
+  expect(page.headers()['permissions-policy']).toContain('microphone=(self)')
+  expect(page.headers()['cross-origin-opener-policy']).toBe('same-origin')
+  const api = await request.get('/api/session')
+  expect(api.headers()['cache-control']).toBe('no-store')
+})
+
+test('the CSP blocks injected inline script, and the violation tracker sees it', async ({ page }) => {
+  test.skip(!process.env.E2E_BASE_URL, 'the backend serves the frontend only in the image test (E2E_BASE_URL)')
+  await page.goto('/')
+  await page.getByLabel('Your Bluesky handle').waitFor()
+  // What an XSS payload would do: inject and run a script.
+  const ran = await page.evaluate(async () => {
+    const script = document.createElement('script')
+    script.textContent = 'window.__injected = true'
+    document.body.append(script)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    return (window as unknown as { __injected?: boolean }).__injected === true
+  })
+  expect(ran, 'inline script must not run').toBe(false)
+  const violations: string[] = await page.evaluate(() => JSON.parse(sessionStorage.getItem('csp-violations') ?? '[]'))
+  expect(violations.some((v) => v.startsWith('script-src'))).toBe(true)
+  await page.evaluate(() => sessionStorage.removeItem('csp-violations')) // expected; don't fail afterEach
 })

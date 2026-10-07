@@ -2,6 +2,9 @@
 name = "voicebook-backend"
 version = "0.1.0"
 edition = "2024"
+# Matches the Dockerfile's toolchain. With edition 2024's resolver, Cargo (and so
+# Dependabot's lockfile updates) prefers dependency versions that build on it.
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0.104"

@@ -1,0 +1,36 @@
+# Weekly dependency update PRs (and security updates, once "Dependabot
+# security updates" is enabled in the repository settings).
+# See docs/design/security.md (row 3) and scripts/audit.sh for the local check.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /backend
+    schedule:
+      interval: weekly
+    # The toolchain is pinned (rust-version in Cargo.toml, the Dockerfile's
+    # RUST_VERSION); a PR needing a newer Rust won't build until it's bumped.
+    groups:
+      rust-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Base images in deploy/Dockerfile.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+
+  # Images in the local network and the local image runner.
+  - package-ecosystem: docker-compose
+    directories:
+      - /dev/localnet
+      - /deploy
+    schedule:
+      interval: weekly

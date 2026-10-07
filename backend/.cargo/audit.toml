@@ -1,0 +1,12 @@
+# cargo audit configuration (see scripts/audit.sh).
+#
+# Every ignored advisory needs a reason, and should be revisited when the
+# dependency changes.
+
+[advisories]
+ignore = [
+    # rsa: "Marvin" timing side channel, no fixed version. Only in Cargo.lock
+    # through sqlx's MySQL driver, which isn't built: `cargo tree -i rsa`
+    # prints nothing, so it isn't in the binary. Voicebook does no RSA.
+    "RUSTSEC-2023-0071",
+]

@@ -4,6 +4,7 @@ mod atproto;
 mod auth;
 mod config;
 mod fetch_guard;
+mod headers;
 mod indexer;
 mod jetstream;
 mod telemetry;
@@ -129,7 +130,8 @@ async fn run(config: Config, telemetry: &telemetry::Telemetry) -> Result<()> {
     let options = api::RouterOptions { metrics: config.metrics_bind.is_none(), frontend_dir: config.frontend_dir.clone() };
     // No CORS: the frontend is same-origin everywhere (Vite proxies /api in
     // development), and allowing other origins would undo the CSRF guard.
-    let app = api::router(state, options);
+    let headers = headers::HeaderPolicy { allow_local_http: config.network.allow_private_addresses };
+    let app = api::router(state, options).layer(axum::middleware::from_fn_with_state(headers, headers::security_headers));
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     info!(target: "lifecycle", addr = %config.bind, "listening");
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;

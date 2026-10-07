@@ -114,7 +114,9 @@ What the hosting project needs to provide:
   }
   ```
 
-  and `$request_id` appended to the access log format. nginx's logs keep
+  and `$request_id` appended to the access log format. Don't add security
+  headers in nginx: the backend already sends them, HSTS included (see
+  `docs/design/security.md`), and duplicates can conflict. nginx's logs keep
   client IPs, stay on the host and rotate after 7 days (see
   `docs/design/logging.md`).
 - **Volumes** for `/data` and `/logs`, e.g. on Block Storage so they survive
@@ -159,7 +161,7 @@ services:
 
 ## Security
 
-Before deploying, check the open items in
+Before deploying, run `scripts/audit.sh --image`, and check the open items in
 [`docs/design/security.md`](../docs/design/security.md).
 
 ## Secrets
