@@ -78,8 +78,10 @@ environment JSON lists the DIDs that may use the instance:
 "access": { "allowlist": ["did:plc:oq6rkprwln2i4rtv5gcignb6"] }
 ```
 
-- **DIDs, not handles**: handles can change. Find an account's DID with
-  `scripts/voicebook_records.py <handle>` (first line of output).
+- **DIDs, not handles**: handles can change. `scripts/invite.py` takes
+  handles, verifies them in both directions, and edits the DIDs into the
+  container environments: `scripts/invite.py add alice.bsky.social`
+  (`--admin` for an admin), `remove`, and `list` (with current handles).
 - Only listed accounts are indexed, refreshed or served. Anyone else can sign
   in with Bluesky but sees "Voicebook is invite-only during the beta"; the
   per-account API endpoints answer them with 403 `not_invited`.
@@ -130,7 +132,22 @@ What the hosting project needs to provide:
 
 ### App Platform
 
-A service built from the image, roughly:
+`deploy/app-platform/deploy.sh` deploys the current commit: it checks the tree
+is clean, runs `scripts/audit.sh`, builds and pushes
+`registry.digitalocean.com/<registry>/voicebook:<commit>` (skipped if that tag
+is already there), deploys it with the spec in `deploy/app-platform/app.yaml`
+(creating the app the first time), and waits for `/api/health`. `--dry-run`
+shows the plan without changing anything. It assumes `doctl auth init` and
+`doctl registry login`; a token scoped to Apps and Container Registry is
+enough.
+
+```bash
+scripts/invite.py add alice.bsky.social    # an invite is part of the image's config…
+git commit -am "Invite alice"              # …so commit it…
+deploy/app-platform/deploy.sh              # …and deploy
+```
+
+The spec, roughly:
 
 ```yaml
 services:

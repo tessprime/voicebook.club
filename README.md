@@ -131,6 +131,9 @@ scripts/voicebook_records.py alice.bsky.social --clear             # delete all
 scripts/voicebook_records.py alice.test --env development --clear  # against the local network
 ```
 
+`scripts/invite.py add <handle>` invites an account to the closed beta
+(`remove`, `list`, `--admin`); see `deploy/README.md`.
+
 `scripts/audit.sh` checks the Rust and npm dependencies for known
 vulnerabilities (`--image` also scans the container image, with Trivy);
 Dependabot does the same continuously on GitHub.

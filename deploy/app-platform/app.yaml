@@ -1,0 +1,14 @@
+name: voicebook
+region: nyc
+services:
+  - name: web
+    image:
+      registry_type: DOCR
+      repository: voicebook
+      tag: DEPLOY_SH_SETS_THIS   # deploy.sh deploys the current commit's image
+    run_command: /app/voicebook-backend --environment app-platform
+    http_port: 8080          # 9100 (/metrics) is deliberately not listed, so it's never routed
+    instance_count: 1        # exactly one: SQLite and the Jetstream consumer
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    health_check:
+      http_path: /api/health
