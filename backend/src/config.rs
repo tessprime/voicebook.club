@@ -31,6 +31,18 @@ pub struct Config {
     pub telemetry: Telemetry,
     #[serde(default)]
     pub access: AccessConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// Let the backend fetch plain-HTTP and private/loopback addresses from
+    /// DID documents. Only for the local network in dev/localnet; off, it
+    /// guards against SSRF (see fetch_guard.rs).
+    #[serde(default)]
+    pub allow_private_addresses: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

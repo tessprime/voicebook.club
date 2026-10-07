@@ -12,5 +12,8 @@
       "directory": "/logs",
       "retentionDays": 3
     }
+  },
+  "network": {
+    "allowPrivateAddresses": true
   }
 }

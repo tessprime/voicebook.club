@@ -7,7 +7,10 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use reqwest::Url;
 use tracing::{Instrument, instrument};
+
+use crate::fetch_guard::{self, FetchPolicy};
 
 pub const RECORDING: &str = "club.voicebook.recording";
 pub const FOLLOW: &str = "app.bsky.graph.follow";
@@ -17,7 +20,9 @@ const PAGE_SIZE: usize = 100;
 
 #[derive(Clone)]
 pub struct Client {
+    /// Enforces the fetch guard on every request (see fetch_guard.rs).
     http: reqwest::Client,
+    policy: FetchPolicy,
     plc_url: String,
 }
 
@@ -64,11 +69,12 @@ struct ListedRecord {
 }
 
 impl Client {
-    pub fn new(plc_url: &str) -> Self {
-        Self {
-            http: reqwest::Client::new(),
+    pub fn new(plc_url: &str, policy: FetchPolicy) -> Result<Self> {
+        Ok(Self {
+            http: fetch_guard::client(policy)?,
+            policy,
             plc_url: plc_url.trim_end_matches('/').to_owned(),
-        }
+        })
     }
 
     #[instrument(skip(self))]
@@ -81,7 +87,12 @@ impl Client {
             bail!("unsupported DID method: {did}");
         };
         let doc: DidDocument = self.get_json("resolve_did", &url, &[]).await.with_context(|| format!("resolving {did}"))?;
-        identity_from_doc(doc).with_context(|| format!("DID document for {did}"))
+        let identity = identity_from_doc(doc).with_context(|| format!("DID document for {did}"))?;
+        // The PDS address comes from someone else's document: it's fetched
+        // later and handed to browsers for playback, so it must pass the guard.
+        let pds = Url::parse(&identity.pds_url).with_context(|| format!("PDS URL for {did}"))?;
+        fetch_guard::check_url(&pds, self.policy).with_context(|| format!("PDS URL for {did}"))?;
+        Ok(identity)
     }
 
     /// Lists every record in one collection of a repo, following pagination.
@@ -115,7 +126,7 @@ impl Client {
 impl Client {
     /// One GET with a client span and the outbound latency metric.
     async fn get_json<T: DeserializeOwned>(&self, operation: &'static str, url: &str, query: &[(&str, &str)]) -> Result<T> {
-        let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
+        let host = Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
         let span = tracing::info_span!(
             "atproto request",
             otel.name = operation,
@@ -127,9 +138,19 @@ impl Client {
         );
         let start = Instant::now();
         let result: Result<T> = async {
-            let response = self.http.get(url).query(query).send().await?;
+            fetch_guard::check_url(&Url::parse(url)?, self.policy)?;
+            let mut response = self.http.get(url).query(query).send().await?;
             tracing::Span::current().record("http.response.status_code", i64::from(response.status().as_u16()));
-            Ok(response.error_for_status()?.json().await?)
+            response = response.error_for_status()?;
+            // Read with a cap: the server may be hostile.
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if body.len() + chunk.len() > fetch_guard::MAX_RESPONSE_BYTES {
+                    bail!("response larger than {} bytes", fetch_guard::MAX_RESPONSE_BYTES);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(serde_json::from_slice(&body)?)
         }
         .instrument(span.clone())
         .await;

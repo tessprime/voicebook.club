@@ -522,7 +522,7 @@ mod tests {
         sqlx::migrate!().run(&db).await.unwrap();
         // Nothing listens here: discovery's backfill fails fast and the
         // member is recorded without a snapshot.
-        Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"), access)
+        Indexer::new(db, atproto::Client::new("http://127.0.0.1:1", crate::fetch_guard::FetchPolicy { allow_private: true }).unwrap(), access)
     }
 
     fn event(value: serde_json::Value) -> Event {
@@ -637,7 +637,7 @@ mod tests {
             .foreign_keys(true);
         let db = SqlitePoolOptions::new().max_connections(4).connect_with(options).await.unwrap();
         sqlx::migrate!().run(&db).await.unwrap();
-        let ix = Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"), Access::default());
+        let ix = Indexer::new(db, atproto::Client::new("http://127.0.0.1:1", crate::fetch_guard::FetchPolicy { allow_private: true }).unwrap(), Access::default());
         ix.handle(&recording(ALICE, 1, "r0", "2026-10-05T09:00:00Z"), "recordings").await.unwrap();
 
         let recordings = {

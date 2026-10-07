@@ -2,6 +2,7 @@ mod access;
 mod api;
 mod atproto;
 mod config;
+mod fetch_guard;
 mod indexer;
 mod jetstream;
 mod telemetry;
@@ -74,7 +75,12 @@ async fn run(config: Config, telemetry: &telemetry::Telemetry) -> Result<()> {
     sqlx::migrate!().run(&db).await?;
 
     let access = access::Access::new(config.access.allowlist.as_deref())?;
-    let indexer = Indexer::new(db.clone(), atproto::Client::new(&config.plc_url), access.clone());
+    let policy = fetch_guard::FetchPolicy { allow_private: config.network.allow_private_addresses };
+    if policy.allow_private {
+        warn!(target: "lifecycle", "SSRF protection is off (network.allowPrivateAddresses); for local development only");
+    }
+    let client = atproto::Client::new(&config.plc_url, policy)?;
+    let indexer = Indexer::new(db.clone(), client, access.clone());
     let removed = indexer.enforce_access().await?;
     info!(
         target: "lifecycle",

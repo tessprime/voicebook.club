@@ -39,6 +39,7 @@ Build from a clean tree for real releases; otherwise the tag ends in `-dirty`.
 | **User** | Runs as uid 10001 (`voicebook`), not root. |
 | **Instances** | **Exactly one.** SQLite and the Jetstream consumer aren't built to run as several replicas. |
 | **Access** | `access.allowlist` (DIDs) makes the instance invite-only; see [Closed beta](#closed-beta-allowlist). |
+| **Outbound fetches** | Addresses from other people's DID documents (PDSes, `did:web` hosts) must be HTTPS and resolve only to public IPs, with timeouts and an 8 MB response cap (`backend/src/fetch_guard.rs`). Only `network.allowPrivateAddresses`, set for the local network, turns this off. |
 | **Secrets** | None today. See [Secrets](#secrets). |
 
 ### Built-in environments
