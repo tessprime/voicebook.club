@@ -9,6 +9,7 @@ use serde_json::Value;
 use sqlx::{SqlitePool, Sqlite, Transaction};
 use tracing::{Instrument, info, instrument, warn};
 
+use crate::access::Access;
 use crate::atproto::{self, FOLLOW, RECORDING, Record};
 
 #[derive(Debug, Deserialize)]
@@ -84,11 +85,28 @@ struct Snapshot {
 pub struct Indexer {
     db: SqlitePool,
     client: atproto::Client,
+    access: Access,
 }
 
 impl Indexer {
-    pub fn new(db: SqlitePool, client: atproto::Client) -> Self {
-        Self { db, client }
+    pub fn new(db: SqlitePool, client: atproto::Client, access: Access) -> Self {
+        Self { db, client, access }
+    }
+
+    /// Removes members the allowlist no longer admits (their recordings and
+    /// follows cascade). Run at startup, so taking an invite away takes
+    /// effect on restart.
+    pub async fn enforce_access(&self) -> Result<usize> {
+        if !self.access.invite_only() {
+            return Ok(0);
+        }
+        let dids: Vec<String> = sqlx::query_scalar("SELECT did FROM members").fetch_all(&self.db).await?;
+        let mut removed = 0;
+        for did in dids.iter().filter(|did| !self.access.allows(did)) {
+            sqlx::query("DELETE FROM members WHERE did = ?").bind(did).execute(&self.db).await?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// The last event processed by a subscription, stored under `cursor_key`.
@@ -120,7 +138,8 @@ impl Indexer {
     /// identity and account events are from non-members.
     pub async fn handle(&self, event: &Event, cursor_key: &str) -> Result<bool> {
         let is_recording = event.commit.as_ref().is_some_and(|c| c.collection == RECORDING);
-        if !is_recording && !self.is_known_member(&event.did).await? {
+        // Accounts outside the allowlist are never indexed or fetched.
+        if !self.access.allows(&event.did) || (!is_recording && !self.is_known_member(&event.did).await?) {
             return Ok(false);
         }
         let collection = event.commit.as_ref().map_or("", |c| c.collection.as_str());
@@ -242,6 +261,9 @@ impl Indexer {
     }
 
     async fn refresh_member_inner(&self, did: &str) -> Result<bool> {
+        if !self.access.allows(did) {
+            return Ok(false);
+        }
         let snapshot = self.fetch_snapshot(did).await;
         let has_recordings = snapshot
             .recordings
@@ -487,6 +509,10 @@ mod tests {
     const BOB: &str = "did:plc:bob";
 
     async fn indexer() -> Indexer {
+        indexer_with(Access::default()).await
+    }
+
+    async fn indexer_with(access: Access) -> Indexer {
         let db = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -496,7 +522,7 @@ mod tests {
         sqlx::migrate!().run(&db).await.unwrap();
         // Nothing listens here: discovery's backfill fails fast and the
         // member is recorded without a snapshot.
-        Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"))
+        Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"), access)
     }
 
     fn event(value: serde_json::Value) -> Event {
@@ -611,7 +637,7 @@ mod tests {
             .foreign_keys(true);
         let db = SqlitePoolOptions::new().max_connections(4).connect_with(options).await.unwrap();
         sqlx::migrate!().run(&db).await.unwrap();
-        let ix = Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"));
+        let ix = Indexer::new(db, atproto::Client::new("http://127.0.0.1:1"), Access::default());
         ix.handle(&recording(ALICE, 1, "r0", "2026-10-05T09:00:00Z"), "recordings").await.unwrap();
 
         let recordings = {
@@ -636,5 +662,23 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[tokio::test]
+    async fn allowlist_gates_indexing_and_is_enforced_on_startup() {
+        let only_alice = Access::new(Some(&[ALICE.to_owned()])).unwrap();
+        let ix = indexer_with(only_alice.clone()).await;
+        assert!(ix.handle(&recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap());
+        assert!(!ix.handle(&recording(BOB, 2, "r2", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap(), "bob isn't invited");
+        assert!(!ix.refresh_member(BOB).await.unwrap());
+        assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 1);
+
+        // Bob was a member before the allowlist (or before his invite was
+        // withdrawn); startup removes him.
+        let open = Indexer { access: Access::default(), ..ix.clone() };
+        open.handle(&recording(BOB, 3, "r3", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap();
+        assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 2);
+        assert_eq!(ix.enforce_access().await.unwrap(), 1);
+        assert_eq!(count(&ix, "SELECT count(*) FROM recordings WHERE did = 'did:plc:bob'").await, 0);
     }
 }

@@ -90,14 +90,16 @@ VOICEBOOK_STDERR=info cargo run 2>&1 | ../scripts/logview
 | `GET /api/health` | status and the Jetstream cursors |
 | `GET /metrics` | Prometheus metrics |
 | `GET /api/members` | known Voicebook members |
+| `GET /api/access/{did}` | whether an account may use this instance (closed-beta allowlist) |
 | `POST /api/members/{did}/refresh` | re-read an account's repo now, instead of waiting for Jetstream |
 | `GET /api/users/{did}/recordings?limit&before` | a user's recordings, newest first |
 | `GET /api/users/{did}/calendar?month=YYYY-MM&tzOffsetMinutes` | practice days in the viewer's time zone |
 | `GET /api/users/{did}/friends/activity?limit&before` | recent recordings by members `did` follows |
-| `POST /api/dev/reindex` | re-fetch every member from their PDS |
+| `POST /api/dev/reindex` | re-fetch every member from their PDS (development only) |
 
 Recordings include an `audioUrl` that the browser plays straight from the
-author's PDS.
+author's PDS. With an allowlist configured (`access.allowlist`, see
+`deploy/README.md`), per-account endpoints answer uninvited DIDs with 403.
 
 The backend keeps two live Jetstream subscriptions, for Voicebook recordings
 and for follows (plus members' identity and account changes). History comes

@@ -7,5 +7,10 @@
   "frontendDir": "/app/frontend",
   "telemetry": {
     "stderr": "info"
+  },
+  "access": {
+    "allowlist": [
+      "did:plc:oq6rkprwln2i4rtv5gcignb6"
+    ]
   }
 }

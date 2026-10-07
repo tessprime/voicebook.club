@@ -161,3 +161,21 @@ test('a failed upload keeps the recording in the browser', async ({ page }) => {
   await banner.getByRole('button', { name: 'Discard' }).click()
   await expect(banner).toHaveCount(0)
 })
+
+test('an account not on the allowlist sees the invite-only screen', async ({ page }) => {
+  // Development is open; simulate the closed beta's answer for this account.
+  await page.route('**/api/access/**', (route) => route.fulfill({ json: { allowed: false, inviteOnly: true } }))
+  await page.goto('/')
+  await page.getByLabel('Your Bluesky handle').fill('dave.test')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.waitForURL(/\/oauth\/authorize/)
+  await page.locator('input[name=password]').fill('password')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.getByRole('button', { name: 'Authorize' }).click()
+
+  await expect(page.getByText('invite-only during the beta')).toBeVisible()
+  await expect(page.getByText('@dave.test')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Start Practice' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await expect(page.getByLabel('Your Bluesky handle')).toBeVisible()
+})

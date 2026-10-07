@@ -16,6 +16,7 @@ use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use tower_http::trace::TraceLayer;
 use tracing::error;
 
+use crate::access::Access;
 use crate::atproto;
 use crate::indexer::Indexer;
 use crate::jetstream;
@@ -26,6 +27,7 @@ use crate::web;
 pub struct AppState {
     pub db: SqlitePool,
     pub indexer: Indexer,
+    pub access: Access,
     pub metrics: PrometheusHandle,
     pub public_url: Option<String>,
 }
@@ -35,6 +37,8 @@ pub struct RouterOptions {
     pub metrics: bool,
     /// Serve the built frontend from this directory.
     pub frontend_dir: Option<std::path::PathBuf>,
+    /// Serve development-only endpoints (`POST /api/dev/reindex`).
+    pub dev_endpoints: bool,
 }
 
 pub fn router(state: AppState, options: RouterOptions) -> Router {
@@ -44,7 +48,7 @@ pub fn router(state: AppState, options: RouterOptions) -> Router {
         .route("/api/users/{did}/recordings", get(recordings))
         .route("/api/users/{did}/calendar", get(calendar))
         .route("/api/users/{did}/friends/activity", get(friends_activity))
-        .route("/api/dev/reindex", post(reindex))
+        .route("/api/access/{did}", get(access))
         // Layers wrap only the routes above: each API request gets a trace
         // span, a latency measurement and an x-trace-id response header.
         .layer(middleware::from_fn(request_telemetry))
@@ -53,6 +57,7 @@ pub fn router(state: AppState, options: RouterOptions) -> Router {
         .route("/api/health", get(health))
         .route("/client-metadata.json", get(web::client_metadata));
     let router = if options.metrics { router.route("/metrics", get(metrics)) } else { router };
+    let router = if options.dev_endpoints { router.route("/api/dev/reindex", post(reindex)) } else { router };
     let router = match options.frontend_dir {
         Some(dir) => router.fallback(move |req: Request| async move { web::frontend(&dir, req).await }),
         None => router,
@@ -135,18 +140,34 @@ async fn metrics(State(state): State<AppState>) -> String {
     state.metrics.render()
 }
 
-pub struct ApiError(anyhow::Error);
+pub enum ApiError {
+    Internal(anyhow::Error),
+    /// The account isn't on this instance's allowlist (closed beta).
+    NotInvited,
+}
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self::Internal(err.into())
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        error!(error = %format!("{:#}", self.0), "request failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response()
+        match self {
+            Self::Internal(err) => {
+                error!(error = %format!("{err:#}"), "request failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response()
+            }
+            Self::NotInvited => (StatusCode::FORBIDDEN, Json(json!({ "error": "not_invited" }))).into_response(),
+        }
+    }
+}
+
+impl AppState {
+    /// Per-account endpoints serve only accounts this instance admits.
+    fn require_access(&self, did: &str) -> Result<(), ApiError> {
+        if self.access.allows(did) { Ok(()) } else { Err(ApiError::NotInvited) }
     }
 }
 
@@ -255,6 +276,7 @@ async fn recordings(
     Path(did): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<Vec<Recording>> {
+    state.require_access(&did)?;
     let rows: Vec<RecordingRow> = sqlx::query_as(&format!(
         "{RECORDING_COLUMNS} WHERE r.did = ? AND (? IS NULL OR r.created_at < ?) ORDER BY r.created_at DESC LIMIT ?"
     ))
@@ -291,6 +313,7 @@ async fn calendar(
     Path(did): Path<String>,
     Query(query): Query<CalendarQuery>,
 ) -> Result<Json<Vec<PracticeDay>>, Response> {
+    state.require_access(&did).map_err(IntoResponse::into_response)?;
     let valid_month = query.month.len() == 7
         && query.month.as_bytes()[4] == b'-'
         && query.month.chars().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit());
@@ -318,6 +341,7 @@ async fn friends_activity(
     Path(did): Path<String>,
     Query(page): Query<Page>,
 ) -> ApiResult<Vec<Recording>> {
+    state.require_access(&did)?;
     let follows = state.indexer.follows_of(&did).await?;
     if follows.is_empty() {
         return Ok(Json(Vec::new()));
@@ -344,8 +368,19 @@ async fn refresh_member(State(state): State<AppState>, Path(did): Path<String>) 
     if !(did.starts_with("did:plc:") || did.starts_with("did:web:")) || did.len() > 256 {
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "expected a did:plc or did:web DID" }))).into_response());
     }
+    state.require_access(&did).map_err(IntoResponse::into_response)?;
     let member = state.indexer.refresh_member(&did).await.map_err(|err| ApiError::from(err).into_response())?;
     Ok(Json(json!({ "member": member })))
+}
+
+/// Whether an account may use this instance; the frontend asks right after
+/// sign-in. `inviteOnly` tells it whether to explain the closed beta.
+async fn access(State(state): State<AppState>, Path(did): Path<String>) -> Json<serde_json::Value> {
+    let allowed = state.access.allows(&did);
+    if !allowed {
+        tracing::info!(did, "sign-in by an account not on the allowlist");
+    }
+    Json(json!({ "allowed": allowed, "inviteOnly": state.access.invite_only() }))
 }
 
 async fn reindex(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

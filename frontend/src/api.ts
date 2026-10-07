@@ -54,6 +54,11 @@ export function friendsActivity(did: string, limit = 50): Promise<Recording[]> {
   return get(`/api/users/${encodeURIComponent(did)}/friends/activity?limit=${limit}`)
 }
 
+/** Whether this account may use the instance (closed beta allowlist). */
+export async function access(did: string): Promise<{ allowed: boolean; inviteOnly: boolean }> {
+  return get(`/api/access/${encodeURIComponent(did)}`)
+}
+
 /**
  * Asks the backend to re-read the account's repo now rather than wait for
  * Jetstream, which can lag. Returns whether the account is a member.

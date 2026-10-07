@@ -38,6 +38,7 @@ Build from a clean tree for real releases; otherwise the tag ends in `-dirty`.
 | **Signals** | SIGTERM shuts down gracefully and flushes logs. |
 | **User** | Runs as uid 10001 (`voicebook`), not root. |
 | **Instances** | **Exactly one.** SQLite and the Jetstream consumer aren't built to run as several replicas. |
+| **Access** | `access.allowlist` (DIDs) makes the instance invite-only; see [Closed beta](#closed-beta-allowlist). |
 | **Secrets** | None today. See [Secrets](#secrets). |
 
 ### Built-in environments
@@ -66,6 +67,30 @@ loopback address (127.0.0.1), the frontend uses a loopback client instead and
 needs no metadata.
 
 The requested scopes are `atproto repo:club.voicebook.recording blob:audio/*`.
+
+## Closed beta: allowlist
+
+Both container environments are invite-only. `access.allowlist` in the
+environment JSON lists the DIDs that may use the instance:
+
+```json
+"access": { "allowlist": ["did:plc:oq6rkprwln2i4rtv5gcignb6"] }
+```
+
+- **DIDs, not handles**: handles can change. Find an account's DID with
+  `scripts/voicebook_records.py <handle>` (first line of output).
+- Only listed accounts are indexed, refreshed or served. Anyone else can sign
+  in with Bluesky but sees "Voicebook is invite-only during the beta"; the
+  per-account API endpoints answer them with 403 `not_invited`.
+- Changes take effect on restart. Members no longer listed are removed from
+  the index then (their data stays in their own repositories).
+- Leaving `access` out makes the instance open (development).
+- On a Droplet, mount your own config (`--config`) and restart to change the
+  list. On App Platform, which can't mount files, the list is part of the
+  image's built-in `app-platform.json`: change it, rebuild and redeploy.
+
+Development-only endpoints (`POST /api/dev/reindex`) exist only with
+`"access": { "devEndpoints": true }`, as in `development.json`.
 
 ## Hosting notes
 

@@ -1,3 +1,4 @@
+mod access;
 mod api;
 mod atproto;
 mod config;
@@ -72,20 +73,33 @@ async fn run(config: Config, telemetry: &telemetry::Telemetry) -> Result<()> {
     let db = SqlitePoolOptions::new().connect_with(options).await?;
     sqlx::migrate!().run(&db).await?;
 
-    let indexer = Indexer::new(db.clone(), atproto::Client::new(&config.plc_url));
+    let access = access::Access::new(config.access.allowlist.as_deref())?;
+    let indexer = Indexer::new(db.clone(), atproto::Client::new(&config.plc_url), access.clone());
+    let removed = indexer.enforce_access().await?;
+    info!(
+        target: "lifecycle",
+        invite_only = access.invite_only(),
+        allowlist = access.allowlist_len(),
+        removed_members = removed,
+        "access"
+    );
     for subscription in [jetstream::RECORDINGS, jetstream::FOLLOWS] {
         tokio::spawn(jetstream::run(config.jetstream_url.clone(), indexer.clone(), subscription));
     }
     tokio::spawn(record_index_sizes(db.clone()));
 
-    let state = api::AppState { db, indexer, metrics: telemetry.metrics.clone(), public_url: config.public_url.clone() };
+    let state = api::AppState { db, indexer, access, metrics: telemetry.metrics.clone(), public_url: config.public_url.clone() };
     if let Some(addr) = config.metrics_bind {
         let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding metrics listener {addr}"))?;
         info!(target: "lifecycle", %addr, "serving metrics");
         let metrics = api::metrics_router(state.clone());
         tokio::spawn(async move { axum::serve(listener, metrics).await });
     }
-    let options = api::RouterOptions { metrics: config.metrics_bind.is_none(), frontend_dir: config.frontend_dir.clone() };
+    let options = api::RouterOptions {
+        metrics: config.metrics_bind.is_none(),
+        frontend_dir: config.frontend_dir.clone(),
+        dev_endpoints: config.access.dev_endpoints,
+    };
     // Local development only: the frontend runs on its own dev-server port.
     // Deployed, the frontend is same-origin and CORS doesn't come into play.
     let app = api::router(state, options).layer(CorsLayer::permissive());

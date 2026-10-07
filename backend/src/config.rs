@@ -29,6 +29,20 @@ pub struct Config {
     pub metrics_bind: Option<SocketAddr>,
     #[serde(default)]
     pub telemetry: Telemetry,
+    #[serde(default)]
+    pub access: AccessConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessConfig {
+    /// DIDs allowed to use this instance (closed beta). Unset: open to
+    /// everyone. Changing it takes effect on restart; members no longer
+    /// listed are removed from the index.
+    pub allowlist: Option<Vec<String>>,
+    /// Serve development-only endpoints (`POST /api/dev/reindex`).
+    #[serde(default)]
+    pub dev_endpoints: bool,
 }
 
 /// See docs/design/logging.md.

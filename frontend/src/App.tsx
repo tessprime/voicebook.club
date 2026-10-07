@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
-import { refreshMember } from './api'
+import { access, refreshMember } from './api'
 import { initSession, signIn, signOut, type Session } from './auth'
 import { Friends } from './views/Friends'
 import { Practice } from './views/Practice'
@@ -9,7 +9,11 @@ import { Recordings } from './views/Recordings'
 const TABS = ['Practice', 'Recordings', 'Friends'] as const
 type Tab = (typeof TABS)[number]
 
-type AuthState = { kind: 'loading' } | { kind: 'signed-out'; error?: string } | { kind: 'signed-in'; session: Session; handle?: string }
+type AuthState =
+  | { kind: 'loading' }
+  | { kind: 'signed-out'; error?: string }
+  | { kind: 'not-invited'; session: Session; handle?: string }
+  | { kind: 'signed-in'; session: Session; handle?: string }
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ kind: 'loading' })
@@ -21,13 +25,22 @@ export default function App() {
     initSession().then(
       async (session) => {
         if (!session) return setAuth({ kind: 'signed-out' })
-        setAuth({ kind: 'signed-in', session })
+        const handle = await session.agent.com.atproto.repo
+          .describeRepo({ repo: session.did })
+          .then((r) => r.data.handle)
+          .catch(() => undefined)
+        // The backend enforces the allowlist; this only explains it. If the
+        // check itself fails, carry on and let the views report errors.
+        const allowed = await access(session.did).then(
+          (a) => a.allowed,
+          () => true,
+        )
+        if (!allowed) return setAuth({ kind: 'not-invited', session, handle })
+        setAuth({ kind: 'signed-in', session, handle })
         refreshMember(session.did).then(
           () => setDataVersion((v) => v + 1),
           () => undefined, // Jetstream will catch up eventually
         )
-        const profile = await session.agent.com.atproto.repo.describeRepo({ repo: session.did }).catch(() => undefined)
-        if (profile) setAuth({ kind: 'signed-in', session, handle: profile.data.handle })
       },
       (err) => setAuth({ kind: 'signed-out', error: `Sign-in failed: ${err instanceof Error ? err.message : String(err)}` }),
     )
@@ -35,6 +48,9 @@ export default function App() {
 
   if (auth.kind === 'loading') return <main className="centered muted">Loading…</main>
   if (auth.kind === 'signed-out') return <SignIn error={auth.error} />
+  if (auth.kind === 'not-invited') {
+    return <NotInvited handle={auth.handle ?? auth.session.did} onSignOut={() => signOut(auth.session).then(() => setAuth({ kind: 'signed-out' }))} />
+  }
 
   const { session, handle } = auth
   return (
@@ -107,6 +123,19 @@ function SignIn({ error }: { error?: string }) {
           {pending ? 'Redirecting…' : 'Sign in'}
         </button>
       </form>
+    </main>
+  )
+}
+
+function NotInvited({ handle, onSignOut }: { handle: string; onSignOut: () => void }) {
+  return (
+    <main className="centered">
+      <div className="panel sign-in">
+        <h1>Voicebook</h1>
+        <p>Voicebook is invite-only during the beta, and @{handle} isn’t on the list yet.</p>
+        <p className="muted">Nothing was saved to your account.</p>
+        <button onClick={onSignOut}>Sign out</button>
+      </div>
     </main>
   )
 }
