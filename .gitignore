@@ -4,3 +4,4 @@ backend/data/
 dev/localnet/.env
 dev/localnet/localnet.json
 logs/
+deploy/test/localnet.generated.json

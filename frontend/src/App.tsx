@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
-import { access, refreshMember } from './api'
+import { NotInvitedError, backendSession, refreshMember, setReauthenticate, signInToBackend, signOutOfBackend } from './api'
 import { initSession, signIn, signOut, type Session } from './auth'
 import { Friends } from './views/Friends'
 import { Practice } from './views/Practice'
@@ -29,13 +29,22 @@ export default function App() {
           .describeRepo({ repo: session.did })
           .then((r) => r.data.handle)
           .catch(() => undefined)
-        // The backend enforces the allowlist; this only explains it. If the
-        // check itself fails, carry on and let the views report errors.
-        const allowed = await access(session.did).then(
-          (a) => a.allowed,
-          () => true,
-        )
-        if (!allowed) return setAuth({ kind: 'not-invited', session, handle })
+        // Prove the identity to the backend (unless it already knows it).
+        try {
+          const current = await backendSession()
+          if (current.did !== session.did) await signInToBackend(session.agent)
+        } catch (err) {
+          if (err instanceof NotInvitedError) return setAuth({ kind: 'not-invited', session, handle })
+          // Typically an OAuth session from before the backend sign-in scope
+          // existed: signing in again grants it.
+          await signOut(session).catch(() => undefined)
+          return setAuth({
+            kind: 'signed-out',
+            error: `Please sign in again to continue (${err instanceof Error ? err.message : String(err)}).`,
+          })
+        }
+        // Backend sessions can expire or be lost; get a new one on demand.
+        setReauthenticate(() => signInToBackend(session.agent).then(() => undefined))
         setAuth({ kind: 'signed-in', session, handle })
         refreshMember(session.did).then(
           () => setDataVersion((v) => v + 1),
@@ -71,6 +80,8 @@ export default function App() {
           <button
             className="secondary"
             onClick={async () => {
+              setReauthenticate(undefined)
+              await signOutOfBackend().catch(() => undefined)
               await signOut(session)
               setAuth({ kind: 'signed-out' })
             }}

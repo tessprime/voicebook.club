@@ -77,8 +77,16 @@ struct FollowRecord {
 /// A member's full repo state as fetched from their PDS.
 struct Snapshot {
     identity: Option<atproto::Identity>,
-    recordings: Vec<Record>,
-    follows: Vec<Record>,
+    /// None if that collection couldn't be read: the index's copy is kept
+    /// rather than replaced with nothing.
+    recordings: Option<Vec<Record>>,
+    follows: Option<Vec<Record>>,
+}
+
+impl Snapshot {
+    fn count(records: &Option<Vec<Record>>) -> Option<usize> {
+        records.as_ref().map(Vec::len)
+    }
 }
 
 #[derive(Clone)]
@@ -105,6 +113,11 @@ impl Indexer {
         for did in dids.iter().filter(|did| !self.access.allows(did)) {
             sqlx::query("DELETE FROM members WHERE did = ?").bind(did).execute(&self.db).await?;
             removed += 1;
+        }
+        // Sessions belong to accounts that may not be members (no recordings yet).
+        let sessions: Vec<String> = sqlx::query_scalar("SELECT DISTINCT did FROM sessions").fetch_all(&self.db).await?;
+        for did in sessions.iter().filter(|did| !self.access.allows(did)) {
+            sqlx::query("DELETE FROM sessions WHERE did = ?").bind(did).execute(&self.db).await?;
         }
         Ok(removed)
     }
@@ -178,7 +191,7 @@ impl Indexer {
 
         let mut tx = self.begin_write().await?;
         if let Some(snapshot) = snapshot {
-            info!(did = %event.did, recordings = snapshot.recordings.len(), follows = snapshot.follows.len(), "new member");
+            info!(did = %event.did, recordings = Snapshot::count(&snapshot.recordings), follows = Snapshot::count(&snapshot.follows), "new member");
             apply_snapshot(&mut tx, &event.did, &snapshot).await?;
         }
         match event.kind.as_str() {
@@ -233,19 +246,28 @@ impl Indexer {
         Ok(())
     }
 
-    /// Re-fetches every member's recordings and follows from their PDS and
-    /// replaces what the index holds for them.
+    /// Re-reads every known member, and every account the config lists
+    /// (allowlist and admins), from their PDSes. During the invite-only beta
+    /// the config lists everyone who can be a member, so this rebuilds the
+    /// whole index from scratch: e.g. after App Platform's temporary
+    /// filesystem is reset by a deploy. Listed accounts without recordings
+    /// don't become members.
     #[instrument(skip(self))]
     pub async fn reindex_all(&self) -> Result<usize> {
-        let dids: Vec<String> = sqlx::query_scalar("SELECT did FROM members").fetch_all(&self.db).await?;
+        let mut dids: Vec<String> = sqlx::query_scalar("SELECT did FROM members").fetch_all(&self.db).await?;
+        dids.extend(self.access.listed_dids());
+        dids.sort();
+        dids.dedup();
+        let mut members = 0;
         for did in &dids {
-            let snapshot = self.fetch_snapshot(did).await;
-            let mut tx = self.begin_write().await?;
-            apply_snapshot(&mut tx, did, &snapshot).await?;
-            tx.commit().await?;
+            match self.refresh_member(did).await {
+                Ok(true) => members += 1,
+                Ok(false) => {}
+                Err(err) => warn!(did, error = %format!("{err:#}"), "reindexing account failed"),
+            }
         }
-        info!(members = dids.len(), "reindex complete");
-        Ok(dids.len())
+        info!(accounts = dids.len(), members, "reindex complete");
+        Ok(members)
     }
 
     /// Re-reads one account's repo from its PDS. An account with at least one
@@ -268,6 +290,7 @@ impl Indexer {
         let has_recordings = snapshot
             .recordings
             .iter()
+            .flatten()
             .any(|r| serde_json::from_value::<RecordingRecord>(r.value.clone()).is_ok());
         if !has_recordings && !self.is_known_member(did).await? {
             return Ok(false);
@@ -279,7 +302,7 @@ impl Indexer {
         let mut tx = self.begin_write().await?;
         apply_snapshot(&mut tx, did, &snapshot).await?;
         tx.commit().await?;
-        info!(did, recordings = snapshot.recordings.len(), follows = snapshot.follows.len(), "member refreshed");
+        info!(did, recordings = Snapshot::count(&snapshot.recordings), follows = Snapshot::count(&snapshot.follows), "member refreshed");
         Ok(true)
     }
 
@@ -345,13 +368,13 @@ impl Indexer {
                 None
             }
         };
-        let mut snapshot = Snapshot { identity, recordings: Vec::new(), follows: Vec::new() };
+        let mut snapshot = Snapshot { identity, recordings: None, follows: None };
         let Some(pds) = snapshot.identity.as_ref().map(|i| i.pds_url.clone()) else {
             return snapshot;
         };
         for (collection, out) in [(RECORDING, &mut snapshot.recordings), (FOLLOW, &mut snapshot.follows)] {
             match self.client.list_records(&pds, did, collection).await {
-                Ok(records) => *out = records,
+                Ok(records) => *out = Some(records),
                 Err(err) => warn!(did, collection, error = %err, "backfill failed"),
             }
         }
@@ -389,17 +412,22 @@ async fn apply_snapshot(tx: &mut Transaction<'_, Sqlite>, did: &str, snapshot: &
         return Ok(());
     }
     // Replace rather than merge, so records deleted while we weren't looking
-    // disappear too.
-    sqlx::query("DELETE FROM recordings WHERE did = ?").bind(did).execute(&mut **tx).await?;
-    sqlx::query("DELETE FROM follows WHERE actor_did = ?").bind(did).execute(&mut **tx).await?;
-    for record in &snapshot.recordings {
-        if let Some((_, _, rkey)) = atproto::parse_at_uri(&record.uri) {
-            upsert_recording(tx, did, rkey, &record.cid, &record.value).await?;
+    // disappear too; but only collections that were actually read, so a
+    // failed fetch never empties the index's copy.
+    if let Some(recordings) = &snapshot.recordings {
+        sqlx::query("DELETE FROM recordings WHERE did = ?").bind(did).execute(&mut **tx).await?;
+        for record in recordings {
+            if let Some((_, _, rkey)) = atproto::parse_at_uri(&record.uri) {
+                upsert_recording(tx, did, rkey, &record.cid, &record.value).await?;
+            }
         }
     }
-    for record in &snapshot.follows {
-        if let Some((_, _, rkey)) = atproto::parse_at_uri(&record.uri) {
-            upsert_follow(tx, did, rkey, &record.value).await?;
+    if let Some(follows) = &snapshot.follows {
+        sqlx::query("DELETE FROM follows WHERE actor_did = ?").bind(did).execute(&mut **tx).await?;
+        for record in follows {
+            if let Some((_, _, rkey)) = atproto::parse_at_uri(&record.uri) {
+                upsert_follow(tx, did, rkey, &record.value).await?;
+            }
         }
     }
     Ok(())
@@ -666,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowlist_gates_indexing_and_is_enforced_on_startup() {
-        let only_alice = Access::new(Some(&[ALICE.to_owned()])).unwrap();
+        let only_alice = Access::new(Some(&[ALICE.to_owned()]), &[]).unwrap();
         let ix = indexer_with(only_alice.clone()).await;
         assert!(ix.handle(&recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap());
         assert!(!ix.handle(&recording(BOB, 2, "r2", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap(), "bob isn't invited");
@@ -680,5 +708,29 @@ mod tests {
         assert_eq!(count(&ix, "SELECT count(*) FROM members").await, 2);
         assert_eq!(ix.enforce_access().await.unwrap(), 1);
         assert_eq!(count(&ix, "SELECT count(*) FROM recordings WHERE did = 'did:plc:bob'").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_collection_fetch_keeps_the_indexed_copy() {
+        let ix = indexer().await;
+        ix.handle(&recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z"), CURSOR).await.unwrap();
+        ix.handle(&follow(ALICE, 2, "create", "f1", BOB), CURSOR).await.unwrap();
+        let identity = atproto::Identity { handle: Some("alice.test".into()), pds_url: "https://pds.example".into(), signing_key: None };
+
+        // The PDS answered for the DID, but listRecords failed for both collections.
+        let failed = Snapshot { identity: Some(identity.clone()), recordings: None, follows: None };
+        let mut tx = ix.begin_write().await.unwrap();
+        apply_snapshot(&mut tx, ALICE, &failed).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(count(&ix, "SELECT count(*) FROM recordings").await, 1, "kept");
+        assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 1, "kept");
+
+        // A successful, empty read does replace: the records were deleted.
+        let empty = Snapshot { identity: Some(identity), recordings: Some(Vec::new()), follows: Some(Vec::new()) };
+        let mut tx = ix.begin_write().await.unwrap();
+        apply_snapshot(&mut tx, ALICE, &empty).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(count(&ix, "SELECT count(*) FROM recordings").await, 0);
+        assert_eq!(count(&ix, "SELECT count(*) FROM follows").await, 0);
     }
 }

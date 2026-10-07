@@ -361,7 +361,7 @@ Scopes: request only what Voicebook needs: write access to `club.voicebook.recor
 
 Loopback and other public clients receive shorter-lived refresh tokens than confidential clients. That is acceptable for the MVP.
 
-The backend never sees user tokens. It serves only public data, so its API needs no authentication.
+The backend never sees user tokens. To identify callers, the browser exchanges an ATProto service-auth token for a session cookie; see [`design/auth.md`](design/auth.md).
 
 ---
 
@@ -421,16 +421,17 @@ Backend
 
 ## 17. Local API Shape
 
-The backend API is read-only and unauthenticated:
+Every endpoint except `/api/health` and `/api/session` requires a session (see [`design/auth.md`](design/auth.md)):
 
 ```text
 GET  /api/health
+GET|POST|DELETE /api/session        sign-in with a service-auth token; sign-out
 GET  /api/members
 GET  /api/users/:did/recordings?limit&before
 GET  /api/users/:did/calendar?month=YYYY-MM&tzOffsetMinutes
 GET  /api/users/:did/friends/activity?limit&before
 
-POST /api/dev/reindex
+POST /api/admin/reindex              admins only
 ```
 
 Each recording includes an `audioUrl` pointing at `com.atproto.sync.getBlob` on the author's PDS.
@@ -510,7 +511,10 @@ Backfill on discovery is required, not an optimization: follows usually predate 
 
 **Announcing members:** `POST /api/members/{did}/refresh` makes the backend read an account's repo immediately and replace what the index holds for it. The frontend calls it after sign-in and after each save. Only public data is read, but the endpoint needs rate limiting before production.
 
-**Reconstruction:** if the database is lost, members reappear as they sign in: the sign-in refresh restores their recordings and follows from their PDS. Until a member signs in again, they're missing from their friends' activity. `POST /api/dev/reindex` re-fetches every member the index knows.
+**Reconstruction:** if the database is lost, the index is rebuilt from members' PDSes:
+
+- **Invite-only (the closed beta):** the config's allowlist and admins name everyone who can be a member, so at startup the backend re-reads all of them in the background. A lost index (e.g. App Platform resetting the filesystem on deploy) is rebuilt within seconds, and gaps from downtime longer than Jetstream's lookback are filled. `POST /api/admin/reindex` does the same on demand.
+- **Open:** members reappear as they sign in; the sign-in refresh restores their recordings and follows. Until then they're missing from friends' activity.
 
 Replaying Jetstream is not a reconstruction path. The public instances keep about 50 million events (roughly a day and a half, measured 2026-10-06), reject older cursors with HTTP 400 `CursorTooOld`, and must scan the whole window to find Voicebook's few commits, which takes a long time and restarts on every reconnect. When a stored cursor is rejected as too old (e.g. after long downtime), the backend drops it and resumes live; events in the gap reach the index when the affected members next sign in.
 
@@ -518,11 +522,11 @@ Replaying Jetstream is not a reconstruction path. The public instances keep abou
 
 ## 20. Irreducible Local State
 
-None. Members, recordings and follows all come from members' PDSes, restored at sign-in. The only local state is configuration (`backend/environments/`) and the Jetstream cursors, which are disposable.
+None. Members, recordings and follows all come from members' PDSes. The only other local state is the Jetstream cursors and backend sessions, both disposable (a lost session is renewed silently). Configuration (`backend/environments/`) holds the allowlist and admins.
 
 OAuth sessions live in each user's browser, not on the server.
 
-The cost of losing the database is temporary: members who haven't signed in since are missing from friends' activity. Backing up the member list (just DIDs) would let `POST /api/dev/reindex` restore everyone at once; that's an optional production nicety.
+While the instance is invite-only, the allowlist *is* the member list, and losing the database costs nothing (see §19). Once Voicebook opens beyond an allowlist, that list stops being complete: members who haven't signed in since a loss are missing from friends' activity until they do. Persisting the member DIDs (or backing them up) would restore them at once; decide before opening up.
 
 A member with no recordings left is not restored, since their repo is indistinguishable from someone who never used Voicebook.
 

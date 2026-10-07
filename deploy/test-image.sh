@@ -7,9 +7,16 @@ cd "$(dirname "$0")/.."
 
 deploy/build.sh --mode development --tag voicebook:test
 docker rm -f voicebook-test >/dev/null 2>&1 || true
+
+# The test config, with alice (a local-network account) as admin, so the
+# suite's admin test runs. Her DID comes from the seeded network.
+config=deploy/test/localnet.generated.json
+jq --arg alice "$(jq -r .accounts.alice.did dev/localnet/localnet.json)" \
+  '.access = {admins: [$alice]}' deploy/test/localnet.json > "$config"
+export E2E_ADMIN=alice
 # Host networking: the local network's DID documents name localhost:2583.
 docker run -d --name voicebook-test --network host \
-  -v "$PWD/deploy/test/localnet.json:/etc/voicebook/config.json:ro" \
+  -v "$PWD/$config:/etc/voicebook/config.json:ro" \
   --tmpfs /data:uid=10001 --tmpfs /logs:uid=10001 \
   voicebook:test --config /etc/voicebook/config.json >/dev/null
 trap 'docker rm -f voicebook-test >/dev/null' EXIT

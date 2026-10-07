@@ -1,10 +1,12 @@
-//! Read-only JSON API over the index. Everything it serves is public ATProto
-//! data, so no endpoint requires authentication.
+//! JSON API over the index. Callers authenticate with a session cookie
+//! obtained from a service-auth token (see auth.rs and docs/design/auth.md);
+//! only `/api/health` and the session endpoints are open.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{MatchedPath, Path, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{Extension, MatchedPath, Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,6 +20,7 @@ use tracing::error;
 
 use crate::access::Access;
 use crate::atproto;
+use crate::auth::{self, ServiceAuth};
 use crate::indexer::Indexer;
 use crate::jetstream;
 use crate::telemetry;
@@ -30,34 +33,51 @@ pub struct AppState {
     pub access: Access,
     pub metrics: PrometheusHandle,
     pub public_url: Option<String>,
+    pub service_did: String,
+    pub auth: Arc<ServiceAuth>,
 }
+
+/// The authenticated caller, set by `require_session`.
+#[derive(Clone, Debug)]
+pub struct Caller {
+    pub did: String,
+    pub admin: bool,
+}
+
+/// Requests that change something must carry this header. Other sites can't
+/// add custom headers to cross-site requests without CORS approval (which
+/// this API never gives), so it's a CSRF guard on top of SameSite cookies.
+const CSRF_HEADER: &str = "x-voicebook-csrf";
 
 pub struct RouterOptions {
     /// Serve `/metrics` on this router (otherwise it has its own listener).
     pub metrics: bool,
     /// Serve the built frontend from this directory.
     pub frontend_dir: Option<std::path::PathBuf>,
-    /// Serve development-only endpoints (`POST /api/dev/reindex`).
-    pub dev_endpoints: bool,
 }
 
 pub fn router(state: AppState, options: RouterOptions) -> Router {
-    let router = Router::new()
+    // Everything here needs a session (require_session sets the Caller).
+    let protected = Router::new()
         .route("/api/members", get(members))
         .route("/api/members/{did}/refresh", post(refresh_member))
         .route("/api/users/{did}/recordings", get(recordings))
         .route("/api/users/{did}/calendar", get(calendar))
         .route("/api/users/{did}/friends/activity", get(friends_activity))
-        .route("/api/access/{did}", get(access))
+        .route("/api/admin/reindex", post(reindex))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_session));
+    let router = Router::new()
+        .route("/api/session", get(get_session).post(create_session).delete(delete_session))
+        .merge(protected)
         // Layers wrap only the routes above: each API request gets a trace
         // span, a latency measurement and an x-trace-id response header.
         .layer(middleware::from_fn(request_telemetry))
         .layer(TraceLayer::new_for_http().make_span_with(request_span).on_request(()).on_response(()).on_failure(()))
         // Polled frequently; kept out of traces and request metrics.
         .route("/api/health", get(health))
-        .route("/client-metadata.json", get(web::client_metadata));
+        .route("/client-metadata.json", get(web::client_metadata))
+        .route("/.well-known/did.json", get(web::did_document));
     let router = if options.metrics { router.route("/metrics", get(metrics)) } else { router };
-    let router = if options.dev_endpoints { router.route("/api/dev/reindex", post(reindex)) } else { router };
     let router = match options.frontend_dir {
         Some(dir) => router.fallback(move |req: Request| async move { web::frontend(&dir, req).await }),
         None => router,
@@ -84,6 +104,7 @@ fn request_span(req: &Request) -> tracing::Span {
         url.path = req.uri().path(),
         "http.request.header.x-request-id" = request_id(req),
         http.response.status_code = tracing::field::Empty,
+        enduser.id = tracing::field::Empty,
     )
 }
 
@@ -142,8 +163,12 @@ async fn metrics(State(state): State<AppState>) -> String {
 
 pub enum ApiError {
     Internal(anyhow::Error),
+    /// No valid session: sign in to this service (POST /api/session).
+    NotSignedIn,
     /// The account isn't on this instance's allowlist (closed beta).
     NotInvited,
+    /// Signed in, but not allowed to do this (e.g. admin-only).
+    Forbidden,
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -159,7 +184,9 @@ impl IntoResponse for ApiError {
                 error!(error = %format!("{err:#}"), "request failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "internal error" }))).into_response()
             }
+            Self::NotSignedIn => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "not_signed_in" }))).into_response(),
             Self::NotInvited => (StatusCode::FORBIDDEN, Json(json!({ "error": "not_invited" }))).into_response(),
+            Self::Forbidden => (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response(),
         }
     }
 }
@@ -364,28 +391,147 @@ async fn friends_activity(
 /// Asks the backend to re-read an account's repo now, e.g. right after it
 /// signs in or saves a recording, instead of waiting for Jetstream. Only
 /// public data is read, so no authentication is needed.
-async fn refresh_member(State(state): State<AppState>, Path(did): Path<String>) -> Result<Json<serde_json::Value>, Response> {
+async fn refresh_member(
+    State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
+    Path(did): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
     if !(did.starts_with("did:plc:") || did.starts_with("did:web:")) || did.len() > 256 {
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "expected a did:plc or did:web DID" }))).into_response());
+    }
+    // Your own account, or anyone's if you're an admin.
+    if caller.did != did && !caller.admin {
+        return Err(ApiError::Forbidden.into_response());
     }
     state.require_access(&did).map_err(IntoResponse::into_response)?;
     let member = state.indexer.refresh_member(&did).await.map_err(|err| ApiError::from(err).into_response())?;
     Ok(Json(json!({ "member": member })))
 }
 
-/// Whether an account may use this instance; the frontend asks right after
-/// sign-in. `inviteOnly` tells it whether to explain the closed beta.
-async fn access(State(state): State<AppState>, Path(did): Path<String>) -> Json<serde_json::Value> {
-    let allowed = state.access.allows(&did);
-    if !allowed {
-        tracing::info!(did, "sign-in by an account not on the allowlist");
+async fn reindex(State(state): State<AppState>, Extension(caller): Extension<Caller>) -> ApiResult<serde_json::Value> {
+    if !caller.admin {
+        return Err(ApiError::Forbidden);
     }
-    Json(json!({ "allowed": allowed, "inviteOnly": state.access.invite_only() }))
-}
-
-async fn reindex(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let members = state.indexer.reindex_all().await?;
     Ok(Json(json!({ "reindexedMembers": members })))
+}
+
+// --- sessions -----------------------------------------------------------------
+
+/// Admits requests with a valid session from an admitted account, and sets
+/// the `Caller`. Requests that change something must also carry the CSRF
+/// header.
+async fn require_session(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) && !req.headers().contains_key(CSRF_HEADER) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "missing CSRF header" }))).into_response();
+    }
+    let Some(token) = session_cookie(req.headers()) else {
+        return ApiError::NotSignedIn.into_response();
+    };
+    let did = match auth::session_did(&state.db, token).await {
+        Ok(Some(did)) => did,
+        Ok(None) => return ApiError::NotSignedIn.into_response(),
+        Err(err) => return ApiError::from(err).into_response(),
+    };
+    // Checked on every request, so a withdrawn invite takes effect at once.
+    if !state.access.allows(&did) {
+        return ApiError::NotInvited.into_response();
+    }
+    tracing::Span::current().record("enduser.id", did.as_str());
+    let admin = state.access.is_admin(&did);
+    req.extensions_mut().insert(Caller { did, admin });
+    next.run(req).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionInfo {
+    /// The signed-in DID, if any.
+    did: Option<String>,
+    admin: bool,
+    /// What a service-auth token must name to create a session.
+    audience: String,
+    lxm: &'static str,
+}
+
+impl SessionInfo {
+    fn new(state: &AppState, did: Option<String>) -> Self {
+        let admin = did.as_deref().is_some_and(|did| state.access.is_admin(did));
+        Self { did, admin, audience: state.auth.audience().to_owned(), lxm: auth::SESSION_LXM }
+    }
+}
+
+/// Who's signed in (if anyone), and how to sign in.
+async fn get_session(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<SessionInfo> {
+    let did = match session_cookie(&headers) {
+        Some(token) => auth::session_did(&state.db, token).await?.filter(|did| state.access.allows(did)),
+        None => None,
+    };
+    Ok(Json(SessionInfo::new(&state, did)))
+}
+
+/// Exchanges a service-auth token (`Authorization: Bearer …`) for a session
+/// cookie.
+async fn create_session(State(state): State<AppState>, req: Request) -> Result<Response, ApiError> {
+    let Some(token) = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return Err(ApiError::NotSignedIn);
+    };
+    let did = match state.auth.verify(token).await {
+        Ok(did) => did,
+        Err(err) => {
+            tracing::warn!(error = %format!("{err:#}"), "service-auth token rejected");
+            return Err(ApiError::NotSignedIn);
+        }
+    };
+    if !state.access.allows(&did) {
+        tracing::info!(did, "sign-in by an account not on the allowlist");
+        return Err(ApiError::NotInvited);
+    }
+    let session = auth::create_session(&state.db, &did).await?;
+    tracing::info!(did, "session created");
+    let cookie = session_cookie_header(&session, auth::SESSION_DAYS * 24 * 3600, secure_cookie(&req));
+    let mut response = Json(SessionInfo::new(&state, Some(did))).into_response();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    Ok(response)
+}
+
+/// Signs out of this service (the browser also signs out of its PDS).
+async fn delete_session(State(state): State<AppState>, req: Request) -> Result<Response, ApiError> {
+    if !req.headers().contains_key(CSRF_HEADER) {
+        return Ok((StatusCode::FORBIDDEN, Json(json!({ "error": "missing CSRF header" }))).into_response());
+    }
+    if let Some(token) = session_cookie(req.headers()) {
+        auth::delete_session(&state.db, token).await?;
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(header::SET_COOKIE, session_cookie_header("", 0, secure_cookie(&req)));
+    Ok(response)
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|pair| pair.trim().strip_prefix(auth::SESSION_COOKIE)?.strip_prefix('='))
+        .filter(|token| !token.is_empty())
+}
+
+fn session_cookie_header(token: &str, max_age_secs: i64, secure: bool) -> HeaderValue {
+    let secure = if secure { "; Secure" } else { "" };
+    let value = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs}{secure}", auth::SESSION_COOKIE);
+    HeaderValue::from_str(&value).expect("cookie is ASCII")
+}
+
+/// `Secure` everywhere except plain-HTTP loopback (local development), where
+/// browsers wouldn't send it back. Deployed, TLS ends in front of the
+/// container, so the request itself always looks like plain HTTP.
+fn secure_cookie(req: &Request) -> bool {
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let hostname = host.rsplit_once(':').map_or(host, |(name, port)| if port.bytes().all(|b| b.is_ascii_digit()) { name } else { host });
+    !matches!(hostname, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 #[cfg(test)]

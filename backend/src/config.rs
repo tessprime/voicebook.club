@@ -17,6 +17,9 @@ pub struct Config {
     pub database: PathBuf,
     pub plc_url: String,
     pub jetstream_url: String,
+    /// This service's DID (e.g. `did:web:voicebook.club`). Service-auth
+    /// tokens must be addressed to `<serviceDid>#voicebook`.
+    pub service_did: String,
     /// The site's public origin (e.g. `https://voicebook.club`), used for the
     /// OAuth client metadata. If unset, it's derived from each request's
     /// `Host` header, which the proxy in front must pass through.
@@ -52,9 +55,10 @@ pub struct AccessConfig {
     /// everyone. Changing it takes effect on restart; members no longer
     /// listed are removed from the index.
     pub allowlist: Option<Vec<String>>,
-    /// Serve development-only endpoints (`POST /api/dev/reindex`).
+    /// DIDs that administer the instance: they may refresh any account and
+    /// reindex. Admins are always admitted.
     #[serde(default)]
-    pub dev_endpoints: bool,
+    pub admins: Vec<String>,
 }
 
 /// See docs/design/logging.md.

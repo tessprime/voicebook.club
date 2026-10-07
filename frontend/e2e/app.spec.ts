@@ -8,13 +8,21 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 // Seeded by dev/localnet/seed.sh: alice follows bob, carol and dave.
 // bob and carol have recordings; dave never uses Voicebook.
 
-// The backend learns about members when they sign in. Announce bob and carol
-// as their own sign-ins would, so the tests don't depend on index state.
-test.beforeAll(async ({ request }) => {
-  const accounts = JSON.parse(readFileSync(new URL('../../dev/localnet/localnet.json', import.meta.url), 'utf8'))
+const accounts: Record<string, { did: string }> = JSON.parse(
+  readFileSync(new URL('../../dev/localnet/localnet.json', import.meta.url), 'utf8'),
+).accounts
+
+// The backend learns about members when they sign in. bob and carol sign in
+// once (which refreshes their accounts), so the tests don't depend on index
+// state.
+test.beforeAll(async ({ browser }, testInfo) => {
   for (const name of ['bob', 'carol']) {
-    const res = await request.post(`/api/members/${accounts.accounts[name].did}/refresh`)
-    expect(res.ok()).toBe(true)
+    const context = await browser.newContext({ baseURL: testInfo.project.use.baseURL })
+    const page = await context.newPage()
+    const refreshed = page.waitForResponse((r) => r.url().endsWith('/refresh') && r.ok())
+    await signIn(page, `${name}.test`)
+    await refreshed
+    await context.close()
   }
 })
 
@@ -164,7 +172,9 @@ test('a failed upload keeps the recording in the browser', async ({ page }) => {
 
 test('an account not on the allowlist sees the invite-only screen', async ({ page }) => {
   // Development is open; simulate the closed beta's answer for this account.
-  await page.route('**/api/access/**', (route) => route.fulfill({ json: { allowed: false, inviteOnly: true } }))
+  await page.route('**/api/session', (route) =>
+    route.request().method() === 'POST' ? route.fulfill({ status: 403, json: { error: 'not_invited' } }) : route.continue(),
+  )
   await page.goto('/')
   await page.getByLabel('Your Bluesky handle').fill('dave.test')
   await page.getByRole('button', { name: 'Sign in' }).click()
@@ -178,4 +188,50 @@ test('an account not on the allowlist sees the invite-only screen', async ({ pag
   await expect(page.getByRole('button', { name: 'Start Practice' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByLabel('Your Bluesky handle')).toBeVisible()
+})
+
+test('the API requires a session, CSRF headers on changes, and admin rights for others', async ({ page, request }) => {
+  // No session: 401.
+  expect((await request.get('/api/members')).status()).toBe(401)
+  expect((await request.get(`/api/users/${accounts.alice.did}/recordings`)).status()).toBe(401)
+
+  await signIn(page, 'carol.test')
+  const csrf = { 'x-voicebook-csrf': '1' }
+  // The page's request context shares carol's session cookie.
+  expect((await page.request.get('/api/members')).status()).toBe(200)
+  const session = await (await page.request.get('/api/session')).json()
+  expect(session.did).toBe(accounts.carol.did)
+  // Changes need the CSRF header.
+  expect((await page.request.post(`/api/members/${accounts.carol.did}/refresh`)).status()).toBe(403)
+  expect((await page.request.post(`/api/members/${accounts.carol.did}/refresh`, { headers: csrf })).status()).toBe(200)
+  // Not an admin: only her own account.
+  const other = await page.request.post(`/api/members/${accounts.bob.did}/refresh`, { headers: csrf })
+  expect(other.status()).toBe(403)
+  expect((await page.request.post('/api/admin/reindex', { headers: csrf })).status()).toBe(403)
+
+  // Signing out ends the backend session.
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await expect(page.getByLabel('Your Bluesky handle')).toBeVisible()
+  expect((await page.request.get('/api/members')).status()).toBe(401)
+})
+
+test('an admin can refresh any account and reindex', async ({ page }) => {
+  const admin = process.env.E2E_ADMIN
+  test.skip(!admin, 'set E2E_ADMIN to an account the backend lists in access.admins')
+  await signIn(page, `${admin}.test`)
+  const csrf = { 'x-voicebook-csrf': '1' }
+  expect((await (await page.request.get('/api/session')).json()).admin).toBe(true)
+  expect((await page.request.post(`/api/members/${accounts.bob.did}/refresh`, { headers: csrf })).status()).toBe(200)
+  expect((await page.request.post('/api/admin/reindex', { headers: csrf })).status()).toBe(200)
+})
+
+test('a lost backend session is renewed transparently', async ({ page, context }) => {
+  await signIn(page, 'alice.test')
+  // As if the backend's database were lost, or the session expired.
+  await context.clearCookies({ name: 'vb_session' })
+  const renewed = page.waitForResponse((r) => r.url().endsWith('/api/session') && r.request().method() === 'POST' && r.ok())
+  await page.getByRole('button', { name: 'Recordings' }).click()
+  await renewed
+  await expect(page.locator('.recording').first()).toBeVisible()
+  await expect(page.locator('.error')).toHaveCount(0)
 })

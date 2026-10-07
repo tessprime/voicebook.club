@@ -13,10 +13,13 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::api::AppState;
 
-/// The OAuth scopes Voicebook requests: writing its own records and
-/// uploading audio. The frontend's loopback client (local development)
-/// requests the same; keep `frontend/src/auth.ts` in sync.
-pub const OAUTH_SCOPE: &str = "atproto repo:club.voicebook.recording blob:audio/*";
+/// The OAuth scopes Voicebook requests: writing its own records, uploading
+/// audio, and service-auth tokens for signing in to this backend (the
+/// audience is checked here, so any is allowed). The frontend's loopback
+/// client (local development) requests the same; keep `frontend/src/auth.ts`
+/// in sync.
+pub const OAUTH_SCOPE: &str =
+    "atproto repo:club.voicebook.recording blob:audio/* rpc:club.voicebook.auth.createSession?aud=*";
 
 /// The OAuth client metadata for a public browser client. Its URL *is* the
 /// client ID, so the document names itself. See
@@ -42,6 +45,27 @@ fn client_metadata_document(origin: &str) -> Value {
         "application_type": "web",
         "dpop_bound_access_tokens": true,
     })
+}
+
+/// This service's DID document, for `did:web` service DIDs: it names the
+/// `#voicebook` service that service-auth tokens are addressed to.
+pub async fn did_document(State(state): State<AppState>, req: Request) -> Response {
+    if !state.service_did.starts_with("did:web:") {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not a did:web service" }))).into_response();
+    }
+    let Some(origin) = state.public_url.clone().or_else(|| origin_from_host(&req)) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid Host header" }))).into_response();
+    };
+    Json(json!({
+        "@context": ["https://www.w3.org/ns/did/v1"],
+        "id": state.service_did,
+        "service": [{
+            "id": format!("#{}", crate::auth::SERVICE_ID),
+            "type": "VoicebookService",
+            "serviceEndpoint": origin.trim_end_matches('/'),
+        }],
+    }))
+    .into_response()
 }
 
 /// `https://<Host>`: the site is served over HTTPS by whatever terminates

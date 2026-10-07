@@ -4,10 +4,12 @@
 import { Agent } from '@atproto/api'
 import { BrowserOAuthClient, type OAuthSession } from '@atproto/oauth-client-browser'
 
-// Write access to Voicebook recordings and audio uploads only. Deployed, the
-// scope comes from the backend's client metadata (OAUTH_SCOPE in
-// backend/src/web.rs); keep the two in sync.
-const GRANULAR_SCOPE = 'atproto repo:club.voicebook.recording blob:audio/*'
+// Write access to Voicebook recordings and audio uploads, and service-auth
+// tokens for signing in to the backend. Deployed, the scope comes from the
+// backend's client metadata (OAUTH_SCOPE in backend/src/web.rs); keep the two
+// in sync.
+const GRANULAR_SCOPE =
+  'atproto repo:club.voicebook.recording blob:audio/* rpc:club.voicebook.auth.createSession?aud=*'
 
 const plcDirectoryUrl = import.meta.env.VITE_PLC_URL
 const handleResolver = import.meta.env.VITE_HANDLE_RESOLVER ?? 'https://bsky.social'

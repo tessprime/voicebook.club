@@ -10,5 +10,6 @@
       "directory": "../logs",
       "retentionDays": 3
     }
-  }
+  },
+  "serviceDid": "did:web:localhost"
 }

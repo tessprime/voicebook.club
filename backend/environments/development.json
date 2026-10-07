@@ -11,10 +11,8 @@
       "retentionDays": 3
     }
   },
-  "access": {
-    "devEndpoints": true
-  },
   "network": {
     "allowPrivateAddresses": true
-  }
+  },
+  "serviceDid": "did:web:localhost"
 }

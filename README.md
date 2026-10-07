@@ -29,7 +29,7 @@ Early prototype, local development only.
 ## Layout
 
 ```text
-docs/                    MVP specification; design/ for design notes
+docs/                    MVP specification; design/ for design notes; api/ for the API
 dev/localnet/            local PLC, PDS and Jetstream (Docker Compose)
 backend/                 Rust indexer and API (axum, sqlx/SQLite)
 frontend/                React + TypeScript app (Vite)
@@ -85,30 +85,39 @@ http://localhost:3000 shows all of it. To watch everything in the terminal:
 VOICEBOOK_STDERR=info cargo run 2>&1 | ../scripts/logview
 ```
 
+Each endpoint is documented, with a sequence diagram, in
+[`docs/api/`](docs/api/README.md).
+
 | Endpoint | Returns |
 |---|---|
 | `GET /api/health` | status and the Jetstream cursors |
 | `GET /metrics` | Prometheus metrics |
 | `GET /api/members` | known Voicebook members |
-| `GET /api/access/{did}` | whether an account may use this instance (closed-beta allowlist) |
 | `POST /api/members/{did}/refresh` | re-read an account's repo now, instead of waiting for Jetstream |
 | `GET /api/users/{did}/recordings?limit&before` | a user's recordings, newest first |
 | `GET /api/users/{did}/calendar?month=YYYY-MM&tzOffsetMinutes` | practice days in the viewer's time zone |
 | `GET /api/users/{did}/friends/activity?limit&before` | recent recordings by members `did` follows |
-| `POST /api/dev/reindex` | re-fetch every member from their PDS (development only) |
+| `POST /api/admin/reindex` | re-fetch every member and listed account from their PDSes (admins only) |
+| `GET/POST/DELETE /api/session` | sign-in to the backend with a service-auth token, and sign-out |
 
 Recordings include an `audioUrl` that the browser plays straight from the
-author's PDS. With an allowlist configured (`access.allowlist`, see
-`deploy/README.md`), per-account endpoints answer uninvited DIDs with 403.
+author's PDS. Every endpoint except `/api/health` and `/api/session`
+requires a session, created from an ATProto service-auth token; refreshing
+another account and reindexing need an admin (`access.admins`). See
+[`docs/design/auth.md`](docs/design/auth.md), and
+[`docs/design/security.md`](docs/design/security.md) for the security
+checklist and open items.
 
 The backend keeps two live Jetstream subscriptions, for Voicebook recordings
 and for follows (plus members' identity and account changes). History comes
 from members' own PDSes: when an account is first seen, and whenever the
 frontend asks the backend to refresh it after sign-in.
 
-If the database is lost, delete `backend/data/<environment>.sqlite*` and
-restart: members reappear as they sign in. Jetstream replay isn't used for
-recovery; the public instances keep only about a day and a half of events.
+If the database is lost, the index rebuilds from members' PDSes. On an
+invite-only instance that happens at startup, from the accounts listed in
+`access.allowlist` and `access.admins`; otherwise members reappear as they
+sign in. Jetstream replay isn't used for recovery; the public instances keep
+only about a day and a half of events.
 
 ### Scripts
 

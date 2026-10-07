@@ -38,7 +38,7 @@ Build from a clean tree for real releases; otherwise the tag ends in `-dirty`.
 | **Signals** | SIGTERM shuts down gracefully and flushes logs. |
 | **User** | Runs as uid 10001 (`voicebook`), not root. |
 | **Instances** | **Exactly one.** SQLite and the Jetstream consumer aren't built to run as several replicas. |
-| **Access** | `access.allowlist` (DIDs) makes the instance invite-only; see [Closed beta](#closed-beta-allowlist). |
+| **Access** | Every API call needs a session from a service-auth token (`docs/design/auth.md`). `serviceDid` names the service tokens are addressed to; it must match the domain (`did:web:<domain>`). `access.allowlist` makes the instance invite-only, `access.admins` names admins; see [Closed beta](#closed-beta-allowlist). |
 | **Outbound fetches** | Addresses from other people's DID documents (PDSes, `did:web` hosts) must be HTTPS and resolve only to public IPs, with timeouts and an 8 MB response cap (`backend/src/fetch_guard.rs`). Only `network.allowPrivateAddresses`, set for the local network, turns this off. |
 | **Secrets** | None today. See [Secrets](#secrets). |
 
@@ -47,7 +47,7 @@ Build from a clean tree for real releases; otherwise the tag ends in `-dirty`.
 | | `droplet` | `app-platform` |
 |---|---|---|
 | Behind | nginx on the same host | App Platform's edge |
-| Database | `/data` (persistent volume) | `/data` (temporary: reset on each deploy) |
+| Database | `/data` (persistent volume) | `/data` (temporary: reset on each deploy, rebuilt at startup) |
 | JSON log mirror | `/logs` | off (it would vanish on redeploy) |
 | stderr | `warn,lifecycle=info` | `info`: App Platform's log viewer is the mirror |
 | `/metrics` | port 9100, unpublished | port 9100, not routed |
@@ -90,8 +90,9 @@ environment JSON lists the DIDs that may use the instance:
   list. On App Platform, which can't mount files, the list is part of the
   image's built-in `app-platform.json`: change it, rebuild and redeploy.
 
-Development-only endpoints (`POST /api/dev/reindex`) exist only with
-`"access": { "devEndpoints": true }`, as in `development.json`.
+**Admins** (`access.admins`, DIDs) are always admitted, and may refresh any
+account and reindex (`POST /api/admin/reindex`). Both container environments
+start with one admin. See `docs/design/auth.md`.
 
 ## Hosting notes
 
@@ -108,7 +109,7 @@ What the hosting project needs to provide:
   ```nginx
   location / {
       proxy_pass http://127.0.0.1:8080;
-      proxy_set_header Host $host;               # OAuth client metadata
+      proxy_set_header Host $host;               # OAuth metadata, DID document, Secure cookies
       proxy_set_header X-Request-Id $request_id; # ties nginx's log to the backend's
   }
   ```
@@ -144,8 +145,10 @@ services:
 ```
 
 - App Platform terminates TLS and sends plain HTTP to `http_port`.
-- The filesystem is temporary, so the database resets on every deploy; members
-  reappear as they sign in.
+- The filesystem is temporary, so the database resets on every deploy. While
+  the instance is invite-only that costs nothing: at startup the backend
+  re-reads every listed account (allowlist and admins) from their PDSes and
+  rebuilds the index within seconds.
 - **Custom domain:** Networking → Domains → Add domain. Either point the
   domain's nameservers at DigitalOcean, or create a CNAME at your DNS provider
   to the `…ondigitalocean.app` target it shows. A root domain
@@ -153,6 +156,11 @@ services:
   flattening, or the A records App Platform offers. TLS certificates are
   automatic. DNSSEC isn't supported; CAA records must allow `letsencrypt.org`
   and `pki.goog`.
+
+## Security
+
+Before deploying, check the open items in
+[`docs/design/security.md`](../docs/design/security.md).
 
 ## Secrets
 

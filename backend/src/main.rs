@@ -1,6 +1,7 @@
 mod access;
 mod api;
 mod atproto;
+mod auth;
 mod config;
 mod fetch_guard;
 mod indexer;
@@ -13,7 +14,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -74,41 +74,62 @@ async fn run(config: Config, telemetry: &telemetry::Telemetry) -> Result<()> {
     let db = SqlitePoolOptions::new().connect_with(options).await?;
     sqlx::migrate!().run(&db).await?;
 
-    let access = access::Access::new(config.access.allowlist.as_deref())?;
+    let access = access::Access::new(config.access.allowlist.as_deref(), &config.access.admins)?;
     let policy = fetch_guard::FetchPolicy { allow_private: config.network.allow_private_addresses };
     if policy.allow_private {
         warn!(target: "lifecycle", "SSRF protection is off (network.allowPrivateAddresses); for local development only");
     }
     let client = atproto::Client::new(&config.plc_url, policy)?;
+    let service_auth = std::sync::Arc::new(auth::ServiceAuth::new(&config.service_did, client.clone()));
     let indexer = Indexer::new(db.clone(), client, access.clone());
     let removed = indexer.enforce_access().await?;
     info!(
         target: "lifecycle",
         invite_only = access.invite_only(),
         allowlist = access.allowlist_len(),
+        admins = config.access.admins.len(),
+        audience = service_auth.audience(),
         removed_members = removed,
         "access"
     );
     for subscription in [jetstream::RECORDINGS, jetstream::FOLLOWS] {
         tokio::spawn(jetstream::run(config.jetstream_url.clone(), indexer.clone(), subscription));
     }
+    // Invite-only: the config lists everyone who can be a member, so re-read
+    // them all from their PDSes. Rebuilds a lost index (App Platform resets
+    // the filesystem on deploy) and fills gaps from downtime longer than
+    // Jetstream's lookback. In the background: the API serves meanwhile.
+    if access.invite_only() {
+        let indexer = indexer.clone();
+        tokio::spawn(async move {
+            info!(target: "lifecycle", "refreshing listed accounts");
+            match indexer.reindex_all().await {
+                Ok(members) => info!(target: "lifecycle", members, "listed accounts refreshed"),
+                Err(err) => warn!(target: "lifecycle", error = %format!("{err:#}"), "refreshing listed accounts failed"),
+            }
+        });
+    }
     tokio::spawn(record_index_sizes(db.clone()));
 
-    let state = api::AppState { db, indexer, access, metrics: telemetry.metrics.clone(), public_url: config.public_url.clone() };
+    let state = api::AppState {
+        db,
+        indexer,
+        access,
+        metrics: telemetry.metrics.clone(),
+        public_url: config.public_url.clone(),
+        service_did: config.service_did.clone(),
+        auth: service_auth,
+    };
     if let Some(addr) = config.metrics_bind {
         let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding metrics listener {addr}"))?;
         info!(target: "lifecycle", %addr, "serving metrics");
         let metrics = api::metrics_router(state.clone());
         tokio::spawn(async move { axum::serve(listener, metrics).await });
     }
-    let options = api::RouterOptions {
-        metrics: config.metrics_bind.is_none(),
-        frontend_dir: config.frontend_dir.clone(),
-        dev_endpoints: config.access.dev_endpoints,
-    };
-    // Local development only: the frontend runs on its own dev-server port.
-    // Deployed, the frontend is same-origin and CORS doesn't come into play.
-    let app = api::router(state, options).layer(CorsLayer::permissive());
+    let options = api::RouterOptions { metrics: config.metrics_bind.is_none(), frontend_dir: config.frontend_dir.clone() };
+    // No CORS: the frontend is same-origin everywhere (Vite proxies /api in
+    // development), and allowing other origins would undo the CSRF guard.
+    let app = api::router(state, options);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     info!(target: "lifecycle", addr = %config.bind, "listening");
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await?;
@@ -135,6 +156,9 @@ async fn record_index_sizes(db: SqlitePool) {
         )
         .fetch_one(&db)
         .await;
+        if let Err(err) = auth::delete_expired_sessions(&db).await {
+            warn!(error = %err, "deleting expired sessions failed");
+        }
         match counts {
             Ok((members, recordings, follows)) => {
                 metrics::gauge!("index_members").set(members as f64);

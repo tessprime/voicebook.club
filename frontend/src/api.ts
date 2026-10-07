@@ -1,5 +1,6 @@
 // Reads go to the Voicebook backend's index; writes go straight to the
-// user's PDS through their OAuth session.
+// user's PDS through their OAuth session. The backend knows who's calling from
+// a session cookie, created from a service-auth token (docs/design/auth.md).
 
 import type { Agent } from '@atproto/api'
 
@@ -34,10 +35,72 @@ export class BackendError extends Error {
   }
 }
 
+/** Requests that change something carry this header (the backend's CSRF guard). */
+const CSRF_HEADERS = { 'x-voicebook-csrf': '1' }
+
+let reauthenticate: (() => Promise<void>) | undefined
+
+/** How to get a fresh backend session when one expires (set after sign-in). */
+export function setReauthenticate(fn: (() => Promise<void>) | undefined) {
+  reauthenticate = fn
+}
+
+/** A backend request: on 401, signs in to the backend again and retries once. */
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  const method = (init.method ?? 'GET').toUpperCase()
+  const send = () => fetch(path, { ...init, headers: method === 'GET' ? init.headers : { ...init.headers, ...CSRF_HEADERS } })
+  const res = await send()
+  if (res.status !== 401 || !reauthenticate) return res
+  await reauthenticate()
+  return send()
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path)
+  const res = await request(path)
   if (!res.ok) throw new BackendError(path, res)
   return res.json() as Promise<T>
+}
+
+// --- backend session ------------------------------------------------------------
+
+export type BackendSession = {
+  /** The signed-in DID, or null. */
+  did: string | null
+  admin: boolean
+  /** What the service-auth token must name. */
+  audience: string
+  lxm: string
+}
+
+/** The account isn't on the instance's allowlist (closed beta). */
+export class NotInvitedError extends Error {}
+
+export async function backendSession(): Promise<BackendSession> {
+  const res = await fetch('/api/session')
+  if (!res.ok) throw new BackendError('/api/session', res)
+  return res.json() as Promise<BackendSession>
+}
+
+/**
+ * Proves the account's identity to the backend: asks the user's PDS for a
+ * short-lived service-auth token for this service and exchanges it for a
+ * session cookie.
+ */
+export async function signInToBackend(agent: Agent): Promise<BackendSession> {
+  const info = await backendSession()
+  const { data } = await agent.com.atproto.server.getServiceAuth({
+    aud: info.audience,
+    lxm: info.lxm,
+    exp: Math.floor(Date.now() / 1000) + 60,
+  })
+  const res = await fetch('/api/session', { method: 'POST', headers: { authorization: `Bearer ${data.token}` } })
+  if (res.status === 403) throw new NotInvitedError()
+  if (!res.ok) throw new BackendError('/api/session', res)
+  return res.json() as Promise<BackendSession>
+}
+
+export async function signOutOfBackend(): Promise<void> {
+  await fetch('/api/session', { method: 'DELETE', headers: CSRF_HEADERS })
 }
 
 export function recordings(did: string, limit = 100): Promise<Recording[]> {
@@ -54,17 +117,12 @@ export function friendsActivity(did: string, limit = 50): Promise<Recording[]> {
   return get(`/api/users/${encodeURIComponent(did)}/friends/activity?limit=${limit}`)
 }
 
-/** Whether this account may use the instance (closed beta allowlist). */
-export async function access(did: string): Promise<{ allowed: boolean; inviteOnly: boolean }> {
-  return get(`/api/access/${encodeURIComponent(did)}`)
-}
-
 /**
  * Asks the backend to re-read the account's repo now rather than wait for
  * Jetstream, which can lag. Returns whether the account is a member.
  */
 export async function refreshMember(did: string): Promise<boolean> {
-  const res = await fetch(`/api/members/${encodeURIComponent(did)}/refresh`, { method: 'POST' })
+  const res = await request(`/api/members/${encodeURIComponent(did)}/refresh`, { method: 'POST' })
   if (!res.ok) throw new BackendError('refresh', res)
   return ((await res.json()) as { member: boolean }).member
 }

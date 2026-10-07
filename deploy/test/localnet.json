@@ -15,5 +15,6 @@
   },
   "network": {
     "allowPrivateAddresses": true
-  }
+  },
+  "serviceDid": "did:web:localhost"
 }

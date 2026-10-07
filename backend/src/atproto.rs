@@ -31,6 +31,9 @@ pub struct Client {
 pub struct Identity {
     pub handle: Option<String>,
     pub pds_url: String,
+    /// The account's signing key (`#atproto` verification method), as a
+    /// multibase Multikey, for verifying service-auth tokens.
+    pub signing_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,8 +47,17 @@ pub struct Record {
 struct DidDocument {
     #[serde(default, rename = "alsoKnownAs")]
     also_known_as: Vec<String>,
+    #[serde(default, rename = "verificationMethod")]
+    verification_method: Vec<VerificationMethod>,
     #[serde(default)]
     service: Vec<Service>,
+}
+
+#[derive(Deserialize)]
+struct VerificationMethod {
+    id: String,
+    #[serde(rename = "publicKeyMultibase")]
+    public_key_multibase: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -177,7 +189,12 @@ fn identity_from_doc(doc: DidDocument) -> Result<Identity> {
         .and_then(|s| s.endpoint.as_str())
         .context("no #atproto_pds service")?
         .to_owned();
-    Ok(Identity { handle, pds_url })
+    let signing_key = doc
+        .verification_method
+        .iter()
+        .find(|m| m.id.ends_with("#atproto"))
+        .and_then(|m| m.public_key_multibase.clone());
+    Ok(Identity { handle, pds_url, signing_key })
 }
 
 /// Splits `at://did/collection/rkey`.
@@ -207,7 +224,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             identity_from_doc(doc).unwrap(),
-            Identity { handle: Some("alice.test".into()), pds_url: "http://localhost:2583".into() }
+            Identity { handle: Some("alice.test".into()), pds_url: "http://localhost:2583".into(), signing_key: None }
         );
     }
 
