@@ -286,3 +286,77 @@ button.icon {
 button.play {
   align-self: flex-start;
 }
+
+.source-toggle {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.recorder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.recorder-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.recorder audio {
+  width: 100%;
+}
+
+.recorder-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.5rem;
+  font-weight: 600;
+  min-width: 4.5rem;
+}
+
+.recorder-level {
+  flex: 1;
+  min-width: 6rem;
+  height: 0.75rem;
+}
+
+.rec-indicator {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.rec-indicator.live {
+  background: var(--error);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rec-indicator.live {
+    animation: none;
+  }
+}
+
+.draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border-color: var(--accent);
+}

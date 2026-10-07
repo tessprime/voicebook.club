@@ -70,7 +70,7 @@ The backend's one job that the browser cannot do cheaply is knowing **who uses V
 
 The most important design rule is:
 
-> If the local SQLite database is deleted, the backend must rebuild it from ATProto alone.
+> If the SQLite database is lost, nothing is lost: each member's data is rebuilt from their own PDS when they next sign in.
 
 The MVP explicitly tests this (§21).
 
@@ -112,7 +112,6 @@ The local MVP does **not** need:
 - CDN.
 - Full-text search.
 - Mobile application.
-- Native browser recording if upload-first is easier initially.
 - Sophisticated privacy/access controls.
 - End-to-end encryption.
 - Production-grade observability.
@@ -177,13 +176,15 @@ The simplest MVP flow is:
 2. User selects or enters:
    - Book/work title.
    - Chapter or passage identifier.
-3. User selects an audio file from disk.
+3. User records in the browser, or selects an audio file from disk.
+   - Browser recordings are written to IndexedDB chunk by chunk while recording, and kept there until saved: a closed tab or failed upload loses nothing, and unsaved recordings are offered back on the Practice view.
+   - The record's `createdAt` is when recording started, not when it was saved.
 4. The browser uploads the audio to the user's PDS (`com.atproto.repo.uploadBlob`).
 5. The browser creates a `club.voicebook.recording` record referencing the blob (`com.atproto.repo.createRecord`).
 6. The PDS emits the commit on its firehose; Jetstream relays it; the backend indexes it.
-7. The frontend shows the completed recording, refreshing from the backend once it is indexed.
+7. The browser deletes its draft copy, and shows the completed recording once the backend has indexed it.
 
-Native in-browser microphone recording can be added later.
+Recording disables echo cancellation, noise suppression and automatic gain control, which are designed for calls and alter the voice being practiced.
 
 ---
 
@@ -313,6 +314,8 @@ The browser:
 The two steps form one logical operation. If the upload succeeds but record creation fails, the frontend reports the failure clearly and may retry record creation with the same blob reference. An unreferenced blob is eventually garbage-collected by the PDS, so no cleanup is required.
 
 The PDS may normalize the MIME type (e.g. `audio/ogg` becomes `audio/ogg; codecs=opus`); the record should use the blob reference the PDS returned, unchanged.
+
+bsky.social's PDS labels browser-recorded WebM audio as `video/webm`, since it sniffs the container. Browsers play it, but it doesn't match the Lexicon's `accept: ["audio/*"]`; decide before publishing the Lexicon whether to accept `video/webm` or record in another container.
 
 ---
 
@@ -481,14 +484,15 @@ A **member** is any account that has written at least one well-formed `club.voic
 
 ## 19. Indexing, Reindexing and Reconstruction
 
-The backend keeps two Jetstream subscriptions, each with its own stored cursor:
+The backend keeps two Jetstream subscriptions, each with its own stored cursor. Both carry only changes: with no stored cursor they start live. History always comes from members' PDSes, never from replaying Jetstream (see Reconstruction below).
 
 ```text
-recordings: /subscribe?wantedCollections=club.voicebook.recording&cursor=<stored, or 0>
-follows:    /subscribe?wantedCollections=app.bsky.graph.follow[&cursor=<stored>]
+/xrpc/network.bsky.jetstream.subscribeEvents?...
+  recordings: collections=club.voicebook.recording&kinds=commit[&cursor=<stored>]
+  follows:    collections=app.bsky.graph.follow&kinds=commit&kinds=identity&kinds=account[&cursor=<stored>]
 ```
 
-Voicebook records are rare, so the recordings subscription replays Jetstream's archive when it has no cursor. Follows are network-wide and enormous, so that subscription only ever starts live; members' earlier follows come from the backfill on discovery.
+A collection filter only applies to commits: without `kinds`, identity and account events for the entire network arrive too. (The legacy `/subscribe` endpoint ignores `kinds`.) Events that can't affect the index, such as follows by non-members, are skipped without a write transaction; their cursor is saved every few seconds.
 
 For each event, in one SQLite transaction together with the new cursor:
 
@@ -504,17 +508,23 @@ The two subscriptions write concurrently, so write transactions start with `BEGI
 
 Backfill on discovery is required, not an optimization: follows usually predate a user's first recording, and are ignored until the user is a member.
 
-**Reconstruction:** with no stored cursor, the recordings subscription starts from cursor 0, so Jetstream replays its archive and the index rebuilds itself. `POST /api/dev/reindex` re-fetches every known member from their PDS.
+**Announcing members:** `POST /api/members/{did}/refresh` makes the backend read an account's repo immediately and replace what the index holds for it. The frontend calls it after sign-in and after each save. Only public data is read, but the endpoint needs rate limiting before production.
+
+**Reconstruction:** if the database is lost, members reappear as they sign in: the sign-in refresh restores their recordings and follows from their PDS. Until a member signs in again, they're missing from their friends' activity. `POST /api/dev/reindex` re-fetches every member the index knows.
+
+Replaying Jetstream is not a reconstruction path. The public instances keep about 50 million events (roughly a day and a half, measured 2026-10-06), reject older cursors with HTTP 400 `CursorTooOld`, and must scan the whole window to find Voicebook's few commits, which takes a long time and restarts on every reconnect. When a stored cursor is rejected as too old (e.g. after long downtime), the backend drops it and resumes live; events in the gap reach the index when the affected members next sign in.
 
 ---
 
 ## 20. Irreducible Local State
 
-Nothing in SQLite is irreducible: members, recordings and follows are all rebuilt from Jetstream replay plus PDS backfill. The only local state the backend needs is configuration (PLC and Jetstream URLs).
+None. Members, recordings and follows all come from members' PDSes, restored at sign-in. The only local state is configuration (`backend/environments/`) and the Jetstream cursors, which are disposable.
 
 OAuth sessions live in each user's browser, not on the server.
 
-This relies on Jetstream retaining history back to Voicebook's first recording. That holds for the local Jetstream, which has seen everything. The public Jetstream instances only keep "a bounded lookback window", so in production a list of member DIDs becomes irreducible state (backfill alone can rebuild everything else from it). Persisting that list is a pre-production task.
+The cost of losing the database is temporary: members who haven't signed in since are missing from friends' activity. Backing up the member list (just DIDs) would let `POST /api/dev/reindex` restore everyone at once; that's an optional production nicety.
+
+A member with no recordings left is not restored, since their repo is indistinguishable from someone who never used Voicebook.
 
 ---
 
@@ -522,19 +532,17 @@ This relies on Jetstream retaining history back to Voicebook's first recording. 
 
 A core MVP acceptance test is:
 
-> Delete the SQLite index and successfully rebuild it from ATProto.
+> Delete the SQLite database; each member's data is restored when they sign in.
 
 Procedure:
 
 1. Create several test recordings across two or more ATProto accounts.
-2. Verify the UI displays them.
-3. Snapshot the API's responses (members, recordings, calendars, friends activity).
-4. Stop the backend.
-5. Delete the SQLite database.
-6. Start the backend; it replays Jetstream from cursor 0.
-7. Verify the API responses match the snapshot exactly.
+2. Snapshot the API's responses (members, recordings, calendars, friends activity).
+3. Start a backend on an empty database.
+4. Sign in as each member (or `POST /api/members/{did}/refresh` for each).
+5. Verify the API responses match the snapshot.
 
-This test validates the architecture. It passed against the local network on 2026-10-05.
+Passed against the local network on 2026-10-06; the only difference was a former member with no recordings left, which is intended (§20).
 
 ---
 
@@ -671,7 +679,7 @@ voicebook.club/
 
 ### Milestone 3 — Destructive Rebuild Test ✅
 
-- Delete SQLite, restart, confirm identical API responses.
+- Delete SQLite; members' data returns as they sign in.
 
 ### Milestone 4 — Browser Login ✅
 
@@ -715,7 +723,7 @@ The local MVP is complete when all of the following are true:
 - [x] Calendar shows days with recordings.
 - [x] At least two ATProto users can be indexed.
 - [x] Friend activity is derived from Bluesky follows and known members.
-- [x] The SQLite index can be deleted and reconstructed from ATProto.
+- [x] The SQLite index can be deleted; members' data is restored from their PDSes at sign-in.
 - [x] Handles are treated as mutable; DIDs are canonical.
 - [x] No production infrastructure is required.
 
@@ -738,8 +746,8 @@ These should be revisited after the local MVP works:
 - App-level moderation.
 - PDS blob limits and fallback object storage.
 - CDN/caching.
-- Native browser audio recording.
-- Jetstream retention vs. member-list persistence (§20).
+- Backing up the member list for faster recovery (§20).
+- A `dids` filter on the follows subscription, so Jetstream sends only members' events.
 - Scaling the follow subscription beyond what one filtered stream handles.
 - Mobile UX.
 - Streak/goal semantics.

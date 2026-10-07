@@ -13,13 +13,13 @@ type Friend = {
   latestDayMs: number
 }
 
-export function Friends({ session }: { session: Session }) {
+export function Friends({ session, dataVersion }: { session: Session; dataVersion: number }) {
   const [activity, setActivity] = useState<Recording[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     friendsActivity(session.did).then(setActivity, (err) => setError(String(err)))
-  }, [session.did])
+  }, [session.did, dataVersion])
 
   if (error) return <p className="error">Couldn’t load friends’ activity: {error}</p>
   if (!activity) return <p className="muted">Loading…</p>

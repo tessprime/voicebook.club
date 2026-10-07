@@ -4,13 +4,13 @@ import { recordings, type Recording } from '../api'
 import type { Session } from '../auth'
 import { RecordingItem } from '../components/RecordingItem'
 
-export function Recordings({ session }: { session: Session }) {
+export function Recordings({ session, dataVersion }: { session: Session; dataVersion: number }) {
   const [items, setItems] = useState<Recording[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     recordings(session.did, 200).then(setItems, (err) => setError(String(err)))
-  }, [session.did])
+  }, [session.did, dataVersion])
 
   if (error) return <p className="error">Couldn’t load your recordings: {error}</p>
   if (!items) return <p className="muted">Loading…</p>

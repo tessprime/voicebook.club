@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/members", get(members))
+        .route("/api/members/{did}/refresh", post(refresh_member))
         .route("/api/users/{did}/recordings", get(recordings))
         .route("/api/users/{did}/calendar", get(calendar))
         .route("/api/users/{did}/friends/activity", get(friends_activity))
@@ -232,6 +233,17 @@ async fn friends_activity(
     query.push(" ORDER BY r.created_at DESC LIMIT ").push_bind(page.limit());
     let rows: Vec<RecordingRow> = query.build_query_as().fetch_all(&state.db).await?;
     Ok(Json(rows.into_iter().map(Recording::from).collect()))
+}
+
+/// Asks the backend to re-read an account's repo now, e.g. right after it
+/// signs in or saves a recording, instead of waiting for Jetstream. Only
+/// public data is read, so no authentication is needed.
+async fn refresh_member(State(state): State<AppState>, Path(did): Path<String>) -> Result<Json<serde_json::Value>, Response> {
+    if !(did.starts_with("did:plc:") || did.starts_with("did:web:")) || did.len() > 256 {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "expected a did:plc or did:web DID" }))).into_response());
+    }
+    let member = state.indexer.refresh_member(&did).await.map_err(|err| ApiError::from(err).into_response())?;
+    Ok(Json(json!({ "member": member })))
 }
 
 async fn reindex(State(state): State<AppState>) -> ApiResult<serde_json::Value> {

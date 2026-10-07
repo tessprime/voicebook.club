@@ -5,7 +5,7 @@ mod indexer;
 mod jetstream;
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -28,6 +28,9 @@ async fn main() -> Result<()> {
         .filename(&config.database)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // Safe with WAL (a crash can lose the last commits, never corrupt);
+        // the cursor makes lost commits replay.
+        .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true);
     if let Some(dir) = options.get_filename().parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

@@ -43,12 +43,24 @@ export function friendsActivity(did: string, limit = 50): Promise<Recording[]> {
   return get(`/api/users/${encodeURIComponent(did)}/friends/activity?limit=${limit}`)
 }
 
+/**
+ * Asks the backend to re-read the account's repo now rather than wait for
+ * Jetstream, which can lag. Returns whether the account is a member.
+ */
+export async function refreshMember(did: string): Promise<boolean> {
+  const res = await fetch(`/api/members/${encodeURIComponent(did)}/refresh`, { method: 'POST' })
+  if (!res.ok) throw new Error(`refresh: ${res.status} ${res.statusText}`)
+  return ((await res.json()) as { member: boolean }).member
+}
+
 export type NewRecording = {
+  /** When the practice happened; defaults to now. */
+  createdAt?: string
   work: string
   chapter?: string
   notes?: string
   durationMs?: number
-  file: File
+  file: Blob
 }
 
 /**
@@ -56,12 +68,11 @@ export type NewRecording = {
  * the new record's AT URI. The backend indexes it from Jetstream shortly after.
  */
 export async function createRecording(agent: Agent, did: string, input: NewRecording): Promise<string> {
-  const upload = await agent.com.atproto.repo.uploadBlob(input.file, {
-    encoding: input.file.type || 'application/octet-stream',
-  })
+  const encoding = input.file.type || 'application/octet-stream'
+  const upload = await agent.com.atproto.repo.uploadBlob(input.file, { encoding })
   const record = {
     $type: 'club.voicebook.recording',
-    createdAt: new Date().toISOString(),
+    createdAt: input.createdAt ?? new Date().toISOString(),
     work: input.work,
     ...(input.chapter ? { chapter: input.chapter } : {}),
     ...(input.notes ? { notes: input.notes } : {}),
@@ -79,6 +90,8 @@ export async function createRecording(agent: Agent, did: string, input: NewRecor
 
 /** Polls the backend until `uri` is indexed, so the UI can show it. */
 export async function waitForIndexed(did: string, uri: string, timeoutMs = 10_000): Promise<boolean> {
+  // Don't depend on Jetstream's latency for the user's own new recording.
+  await refreshMember(did).catch(() => undefined)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const latest = await recordings(did, 10)

@@ -4,17 +4,20 @@ import { calendar, recordings, type PracticeDay, type Recording } from '../api'
 import type { Session } from '../auth'
 import { PracticeForm } from '../components/PracticeForm'
 import { RecordingItem } from '../components/RecordingItem'
-import { addDays, addMonths, formatDuration, localDate, monthKey } from '../format'
+import { deleteDraft, listDrafts, updateDraft, type Draft } from '../drafts'
+import { addDays, addMonths, formatClock, formatDateTime, formatDuration, localDate, monthKey } from '../format'
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-export function Practice({ session }: { session: Session }) {
+export function Practice({ session, dataVersion }: { session: Session; dataVersion: number }) {
   const [today] = useState(() => localDate(new Date()))
   const [month, setMonth] = useState(() => addMonths(new Date(), 0))
   const [days, setDays] = useState<PracticeDay[]>([])
   const [recent, setRecent] = useState<Recording[]>([])
   const [selected, setSelected] = useState<string | null>(null)
-  const [practicing, setPracticing] = useState(false)
+  // false, or the form's state: optionally resuming an unsaved draft.
+  const [practicing, setPracticing] = useState<false | { draft?: Draft }>(false)
+  const [drafts, setDrafts] = useState<Draft[]>([])
   const [version, setVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
@@ -31,7 +34,25 @@ export function Practice({ session }: { session: Session }) {
     return () => {
       stale = true
     }
-  }, [session.did, month, version])
+  }, [session.did, month, version, dataVersion])
+
+  // Unsaved recordings, re-checked whenever the form closes.
+  useEffect(() => {
+    if (!practicing) listDrafts().then(setDrafts, () => setDrafts([]))
+  }, [practicing])
+
+  async function resume(draft: Draft) {
+    // A recording interrupted mid-way (tab closed) is still usable up to its last chunk.
+    const ready = draft.finished ? draft : { ...draft, finished: true }
+    if (!draft.finished) await updateDraft(ready)
+    setPracticing({ draft: ready })
+  }
+
+  async function discard(draft: Draft) {
+    if (!window.confirm('Discard this recording? It hasn’t been saved anywhere else.')) return
+    await deleteDraft(draft.id)
+    setDrafts(await listDrafts())
+  }
 
   const practiceDays = useMemo(() => new Map(days.map((d) => [d.date, d])), [days])
   const streak = useMemo(() => currentStreak(recent), [recent])
@@ -84,9 +105,26 @@ export function Practice({ session }: { session: Session }) {
       </p>
       {error && <p className="error">Couldn’t load your practice history: {error}</p>}
 
+      {!practicing &&
+        drafts.map((draft) => (
+          <div key={draft.id} className="panel draft-banner" role="status">
+            <span>
+              <strong>Unsaved recording</strong> from {formatDateTime(draft.startedAt)} ({formatClock(draft.durationMs)})
+              {draft.work && <> · {draft.work}</>}
+            </span>
+            <span className="actions">
+              <button className="secondary" onClick={() => discard(draft)}>
+                Discard
+              </button>
+              <button onClick={() => resume(draft)}>Review and save</button>
+            </span>
+          </div>
+        ))}
+
       {practicing ? (
         <PracticeForm
           session={session}
+          initialDraft={practicing.draft}
           onCancel={() => setPracticing(false)}
           onSaved={() => {
             setPracticing(false)
@@ -96,7 +134,7 @@ export function Practice({ session }: { session: Session }) {
           }}
         />
       ) : (
-        <button className="primary-action" onClick={() => setPracticing(true)}>
+        <button className="primary-action" onClick={() => setPracticing({})}>
           Start Practice
         </button>
       )}

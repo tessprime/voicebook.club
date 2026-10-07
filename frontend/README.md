@@ -9,7 +9,8 @@ nvm use
 npm install
 npm run dev          # http://127.0.0.1:5173 (not "localhost": OAuth loopback redirects need the IP)
 npm run dev:production  # same, but against the real Bluesky network (.env.production)
-npm run test:e2e     # Playwright; needs dev/localnet up and seeded, and the backend running
+npm run test:e2e     # Playwright; needs dev/localnet up and seeded, and a development backend
+                     # (VOICEBOOK_API, default http://127.0.0.1:3000); runs its own Vite on :5174
 ```
 
 `.env.development` points identity resolution at the local network
@@ -26,3 +27,13 @@ Notes:
 - PDSes don't honor Range requests, so the player fetches the whole blob into
   an object URL before playing; otherwise Ogg files have no duration and
   can't seek.
+- **Recording** uses `MediaRecorder` (Opus in WebM, Ogg or MP4, whichever the
+  browser supports) with echo cancellation, noise suppression and automatic
+  gain turned off, since they alter the voice being practiced. Each second of
+  audio is written to IndexedDB (`voicebook-drafts`) as it's recorded, so a
+  closed tab or a failed upload loses nothing: the Practice view offers any
+  unsaved recording back, and the draft is deleted only after the record is
+  created on the PDS. The record's `createdAt` is when recording started.
+- Chrome's WebM recordings carry no duration; `fix-webm-duration` writes it
+  into the header so players can show a length and seek.
+

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
+import { refreshMember } from './api'
 import { initSession, signIn, signOut, type Session } from './auth'
 import { Friends } from './views/Friends'
 import { Practice } from './views/Practice'
@@ -13,12 +14,18 @@ type AuthState = { kind: 'loading' } | { kind: 'signed-out'; error?: string } | 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ kind: 'loading' })
   const [tab, setTab] = useState<Tab>('Practice')
+  // Bumped when the backend has re-read the user's repo, to reload the views.
+  const [dataVersion, setDataVersion] = useState(0)
 
   useEffect(() => {
     initSession().then(
       async (session) => {
         if (!session) return setAuth({ kind: 'signed-out' })
         setAuth({ kind: 'signed-in', session })
+        refreshMember(session.did).then(
+          () => setDataVersion((v) => v + 1),
+          () => undefined, // Jetstream will catch up eventually
+        )
         const profile = await session.agent.com.atproto.repo.describeRepo({ repo: session.did }).catch(() => undefined)
         if (profile) setAuth({ kind: 'signed-in', session, handle: profile.data.handle })
       },
@@ -57,9 +64,9 @@ export default function App() {
         </span>
       </header>
       <main>
-        {tab === 'Practice' && <Practice session={session} />}
-        {tab === 'Recordings' && <Recordings session={session} />}
-        {tab === 'Friends' && <Friends session={session} />}
+        {tab === 'Practice' && <Practice session={session} dataVersion={dataVersion} />}
+        {tab === 'Recordings' && <Recordings session={session} dataVersion={dataVersion} />}
+        {tab === 'Friends' && <Friends session={session} dataVersion={dataVersion} />}
       </main>
     </>
   )

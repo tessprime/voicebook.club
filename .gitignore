@@ -3,3 +3,4 @@ target/
 backend/data/
 dev/localnet/.env
 dev/localnet/localnet.json
+logs/

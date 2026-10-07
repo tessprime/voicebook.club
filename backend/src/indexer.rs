@@ -100,8 +100,29 @@ impl Indexer {
         Ok(value.and_then(|v| v.parse().ok()))
     }
 
+    pub async fn clear_cursor(&self, cursor_key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM state WHERE key = ?").bind(cursor_key).execute(&self.db).await?;
+        Ok(())
+    }
+
+    pub async fn save_cursor(&self, cursor_key: &str, cursor: i64) -> Result<()> {
+        sqlx::query("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+            .bind(cursor_key)
+            .bind(cursor.to_string())
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+
     /// Applies one event and advances `cursor_key` in the same transaction.
-    pub async fn handle(&self, event: &Event, cursor_key: &str) -> Result<()> {
+    /// Returns false, without writing anything (including the cursor), for
+    /// events that can't affect the index: most of the network's follows,
+    /// identity and account events are from non-members.
+    pub async fn handle(&self, event: &Event, cursor_key: &str) -> Result<bool> {
+        let is_recording = event.commit.as_ref().is_some_and(|c| c.collection == RECORDING);
+        if !is_recording && !self.is_known_member(&event.did).await? {
+            return Ok(false);
+        }
         // Network work happens before the transaction opens, so the write lock
         // is never held across an HTTP request.
         let snapshot = if self.is_new_member(event).await? {
@@ -176,7 +197,7 @@ impl Indexer {
                 .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Re-fetches every member's recordings and follows from their PDS and
@@ -191,6 +212,30 @@ impl Indexer {
         }
         info!(members = dids.len(), "reindex complete");
         Ok(dids.len())
+    }
+
+    /// Re-reads one account's repo from its PDS. An account with at least one
+    /// well-formed recording becomes (or stays) a member, with its recordings
+    /// and follows replaced by the snapshot. Lets a client announce a new
+    /// member without waiting for Jetstream. Returns whether `did` is a member.
+    pub async fn refresh_member(&self, did: &str) -> Result<bool> {
+        let snapshot = self.fetch_snapshot(did).await;
+        let has_recordings = snapshot
+            .recordings
+            .iter()
+            .any(|r| serde_json::from_value::<RecordingRecord>(r.value.clone()).is_ok());
+        if !has_recordings && !self.is_known_member(did).await? {
+            return Ok(false);
+        }
+        if snapshot.identity.is_none() {
+            // Couldn't reach the PDS; keep whatever the index already has.
+            return self.is_known_member(did).await;
+        }
+        let mut tx = self.begin_write().await?;
+        apply_snapshot(&mut tx, did, &snapshot).await?;
+        tx.commit().await?;
+        info!(did, recordings = snapshot.recordings.len(), follows = snapshot.follows.len(), "member refreshed");
+        Ok(true)
     }
 
     /// Fetches the DIDs `did` follows: from the index for members, otherwise
