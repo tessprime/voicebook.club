@@ -99,7 +99,7 @@ services:
         condition: service_started
 
   jetstream:
-    image: ghcr.io/bluesky-social/jetstream:v0.3.6
+    image: ghcr.io/bluesky-social/jetstream:v0.3.8
     network_mode: host
     command: [serve]
     environment:
