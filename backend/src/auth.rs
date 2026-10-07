@@ -47,18 +47,26 @@ impl ServiceAuth {
         &self.audience
     }
 
-    /// Returns the DID the token proves, or why it doesn't.
-    pub async fn verify(&self, token: &str) -> Result<String> {
+    /// Verifies a token. `admits` is checked on the token's (still
+    /// unverified) `iss` right after the cheap checks and before anything is
+    /// fetched: anyone can post tokens naming any DID, and resolving it means
+    /// network requests (`did:web` even to a host of their choosing). The
+    /// cost: whether a DID is admitted becomes observable without a valid
+    /// token, which is accepted (the allowlist is meant to become public).
+    pub async fn verify(&self, token: &str, admits: impl Fn(&str) -> bool) -> Result<Verdict> {
         let token = Token::parse(token)?;
         let now = chrono::Utc::now().timestamp();
         token.claims.check(&self.audience, now)?;
+        if !admits(&token.claims.iss) {
+            return Ok(Verdict::NotAdmitted { unverified_did: token.claims.iss });
+        }
         // Resolution goes through the SSRF-guarded client.
         let identity = self.client.resolve(&token.claims.iss).await?;
         let key = PublicKey::from_multikey(identity.signing_key.as_deref().context("DID document has no #atproto key")?)?;
         token.verify_signature(&key)?;
         // Only after the signature checks out, so forged tokens can't burn IDs.
         self.consume(&token.claims, now)?;
-        Ok(token.claims.iss)
+        Ok(Verdict::Verified(token.claims.iss))
     }
 
     fn consume(&self, claims: &Claims, now: i64) -> Result<()> {
@@ -68,6 +76,15 @@ impl ServiceAuth {
         ensure!(used.insert(jti.to_owned(), claims.exp).is_none(), "token already used");
         Ok(())
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    /// The token proves this DID.
+    Verified(String),
+    /// The token names a DID that isn't admitted; nothing was fetched and
+    /// the signature wasn't checked, so the DID is only a claim.
+    NotAdmitted { unverified_did: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,5 +352,23 @@ mod tests {
         assert_ne!(stored, token, "only the hash is stored");
         delete_session(&db, &token).await.unwrap();
         assert_eq!(session_did(&db, &token).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn uninvited_issuers_are_turned_away_before_any_fetch() {
+        // The PLC address goes nowhere: resolving anything would fail.
+        let auth = ServiceAuth::new(
+            "did:web:voicebook.club",
+            atproto::Client::new("http://127.0.0.1:1", crate::fetch_guard::FetchPolicy { allow_private: true }).unwrap(),
+        );
+        let now = chrono::Utc::now().timestamp();
+        let token = k256_token("ES256K", &claims(serde_json::json!({ "iss": "did:plc:mallory", "exp": now + 60, "iat": now })));
+        let verdict = auth.verify(&token, |did| did == "did:plc:alice").await.unwrap();
+        assert_eq!(verdict, Verdict::NotAdmitted { unverified_did: "did:plc:mallory".into() });
+        // Its token ID wasn't used up either.
+        assert!(auth.used.lock().unwrap().is_empty());
+        // Bad claims are still rejected first, admitted or not.
+        let wrong_aud = k256_token("ES256K", &claims(serde_json::json!({ "aud": "did:web:other#voicebook", "exp": now + 60 })));
+        assert!(auth.verify(&wrong_aud, |_| false).await.is_err());
     }
 }

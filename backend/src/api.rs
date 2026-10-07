@@ -477,17 +477,19 @@ async fn create_session(State(state): State<AppState>, req: Request) -> Result<R
     else {
         return Err(ApiError::NotSignedIn);
     };
-    let did = match state.auth.verify(token).await {
-        Ok(did) => did,
+    let did = match state.auth.verify(token, |did| state.access.allows(did)).await {
+        Ok(auth::Verdict::Verified(did)) => did,
+        Ok(auth::Verdict::NotAdmitted { unverified_did }) => {
+            // Unverified: the signature isn't checked for accounts that aren't
+            // admitted, so this is only what the token claimed.
+            tracing::info!(unverified_did, "sign-in attempt for an account not on the allowlist");
+            return Err(ApiError::NotInvited);
+        }
         Err(err) => {
             tracing::warn!(error = %format!("{err:#}"), "service-auth token rejected");
             return Err(ApiError::NotSignedIn);
         }
     };
-    if !state.access.allows(&did) {
-        tracing::info!(did, "sign-in by an account not on the allowlist");
-        return Err(ApiError::NotInvited);
-    }
     let session = auth::create_session(&state.db, &did).await?;
     tracing::info!(did, "session created");
     let cookie = session_cookie_header(&session, auth::SESSION_DAYS * 24 * 3600, secure_cookie(&req));

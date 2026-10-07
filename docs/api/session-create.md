@@ -53,13 +53,14 @@ Set-Cookie: vb_session=…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; 
 | Status | `error` | When |
 |---|---|---|
 | 401 | `not_signed_in` | No bearer token, or the token fails any check below. The reason is logged (`service-auth token rejected`), not returned. |
-| 403 | `not_invited` | Valid token, but the account isn't on the allowlist (logged: `sign-in by an account not on the allowlist`) |
+| 403 | `not_invited` | The token's `iss` isn't on the allowlist. Checked before the signature, so nothing is fetched for uninvited accounts; the log line `sign-in attempt for an account not on the allowlist` records the DID as unverified. |
 | 500 | `internal error` | The session couldn't be stored |
 
-The token must: be a JWT signed with ES256K or ES256 matching the account's
-`#atproto` key; carry a low-S signature; name exactly our audience and method;
-not be expired, issued in the future, or valid for more than an hour; and have
-a `jti` not used before.
+The token must: name exactly our audience and method; not be expired, issued
+in the future, or valid for more than an hour; name an admitted `iss` (checked
+before anything is fetched); be a JWT signed with ES256K or ES256 matching the
+account's `#atproto` key, with a low-S signature; and have a `jti` not used
+before.
 
 ## Sequence
 
@@ -75,15 +76,15 @@ sequenceDiagram
     P-->>B: JWT signed with the account's key
     B->>A: POST /api/session, Authorization: Bearer JWT
     A->>A: parse header and claims, then check aud, lxm, exp, iat
+    alt iss not on the allowlist (unverified)
+        A-->>B: 403 not_invited, nothing fetched
+    end
     A->>L: GET /{iss} (SSRF-guarded)
     L-->>A: DID document
     A->>A: #atproto key → verify signature (ES256K/ES256, low-S)
     A->>A: jti unused? record it
     alt any check fails
         A-->>B: 401 not_signed_in
-    end
-    alt not on the allowlist
-        A-->>B: 403 not_invited
     end
     A->>D: INSERT INTO sessions (sha256(token), did, expires in 30 days)
     A-->>B: 200 {did, admin, …} + Set-Cookie: vb_session

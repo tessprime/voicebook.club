@@ -58,6 +58,14 @@ The backend accepts a token only if all of these hold:
 - `aud` is exactly our audience, `lxm` exactly our method;
 - `exp` is in the future and at most an hour out; `iat`, if present, isn't in
   the future (60 s clock-skew allowance);
+- `iss` is admitted (allowlist or admin). Checked right after the claims above
+  and **before** anything is fetched: anyone can post tokens naming any DID,
+  and resolving it means network requests (for `did:web`, to a host of the
+  sender's choosing). Uninvited issuers get 403 `not_invited` without a
+  signature check. The cost, accepted on purpose: whether a DID is invited is
+  observable without a valid token (the allowlist is meant to become public).
+  The log line for these (`sign-in attempt for an account not on the
+  allowlist`) records the DID as `unverified_did`;
 - `jti` hasn't been used: each token creates one session (checked after the
   signature, so forged tokens can't burn IDs).
 
