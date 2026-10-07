@@ -3178,7 +3178,7 @@ dependencies = [
  "bs58",
  "chrono",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "k256",
  "metrics",
