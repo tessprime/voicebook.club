@@ -29,10 +29,11 @@ Early prototype, local development only.
 ## Layout
 
 ```text
-docs/                    MVP specification
+docs/                    MVP specification; design/ for design notes
 dev/localnet/            local PLC, PDS and Jetstream (Docker Compose)
 backend/                 Rust indexer and API (axum, sqlx/SQLite)
 frontend/                React + TypeScript app (Vite)
+deploy/                  the container image: Dockerfile, build and test scripts
 scripts/                 maintenance scripts
 lexicons/                club.voicebook.recording schema
 ```
@@ -63,19 +64,31 @@ See [`dev/localnet/README.md`](dev/localnet/README.md) for details.
 
 ```bash
 cd backend
-cargo run                                  # environments/development.json: local network, API on 127.0.0.1:3000
-cargo run -- --environment production      # environments/production.json: real Bluesky network
+cargo run                                  # environments/development.json: local network, API on 127.0.0.1:8080
+cargo run -- --environment local-bluesky   # environments/local-bluesky.json: real Bluesky network
 cargo test
 ```
 
-Settings live in `backend/environments/<name>.json` (`bind`, `database`,
-`plcUrl`, `jetstreamUrl`); `--config <path>` loads any other file. `RUST_LOG`
-sets log levels. Each environment has its own SQLite file under
-`backend/data/`.
+Settings live in `backend/environments/<name>.json` (`development`: the local
+network; `local-bluesky`: the real network, run from this repo; `droplet` and
+`app-platform`: inside the container image) ; `--config <path>` loads any other file. The schema is
+`backend/src/config.rs`. Each environment has its own SQLite file under `backend/data/`.
+
+Telemetry (see [`docs/design/logging.md`](docs/design/logging.md)): traces and
+logs go over OTLP to `telemetry.otlpEndpoint`, metrics are served at
+`GET /metrics` for Prometheus, every log event and request is mirrored as JSON
+lines to `logs/backend-<environment>.<date>.jsonl` (rotated daily, 3 days
+kept), and stderr carries a diagnostic channel (warnings, errors, lifecycle). Locally, Grafana at
+http://localhost:3000 shows all of it. To watch everything in the terminal:
+
+```bash
+VOICEBOOK_STDERR=info cargo run 2>&1 | ../scripts/logview
+```
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/health` | status and the Jetstream cursor |
+| `GET /api/health` | status and the Jetstream cursors |
+| `GET /metrics` | Prometheus metrics |
 | `GET /api/members` | known Voicebook members |
 | `POST /api/members/{did}/refresh` | re-read an account's repo now, instead of waiting for Jetstream |
 | `GET /api/users/{did}/recordings?limit&before` | a user's recordings, newest first |
@@ -107,6 +120,22 @@ scripts/voicebook_records.py alice.bsky.social --clear             # delete all
 scripts/voicebook_records.py alice.test --env development --clear  # against the local network
 ```
 
+`scripts/logview` pretty-prints the backend's JSON log lines:
+`tail -f logs/backend-local-bluesky.*.jsonl | scripts/logview`, with `--level`
+and `--trace` filters.
+
 Deleting prompts for the account's password (an app password for real
 Bluesky accounts) and asks for confirmation; `--yes` skips the confirmation,
 and `VOICEBOOK_PASSWORD` supplies the password non-interactively.
+
+## Deployment
+
+Voicebook ships as one container image (the backend serving the built
+frontend). See [`deploy/README.md`](deploy/README.md) for building it, its
+contract (ports, volumes, config), hosting notes for a Droplet or App
+Platform, and how secrets will work.
+
+```bash
+deploy/build.sh            # voicebook:<sha>, voicebook:latest
+deploy/test-image.sh       # the Playwright suite against the container
+```

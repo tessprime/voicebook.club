@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "dev:production": "vite --mode production",
+    "dev:bluesky": "vite --mode production",
     "test:e2e": "playwright test"
   },
   "dependencies": {

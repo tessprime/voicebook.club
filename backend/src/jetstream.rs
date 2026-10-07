@@ -56,7 +56,15 @@ impl Subscription {
 pub async fn run(base_url: String, indexer: Indexer, subscription: Subscription) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        match consume(&base_url, &indexer, &subscription, &mut backoff).await {
+        let result = consume(&base_url, &indexer, &subscription, &mut backoff).await;
+        metrics::gauge!("jetstream_connected", "subscription" => subscription.name).set(0.0);
+        let reason = match &result {
+            Ok(()) => "closed",
+            Err(err) if is_cursor_too_old(err) => "cursor_too_old",
+            Err(_) => "error",
+        };
+        metrics::counter!("jetstream_reconnects_total", "subscription" => subscription.name, "reason" => reason).increment(1);
+        match result {
             Ok(()) => warn!(subscription = subscription.name, "jetstream closed the connection"),
             Err(err) if is_cursor_too_old(&err) => {
                 // The stored cursor fell out of Jetstream's lookback window
@@ -84,7 +92,8 @@ async fn consume(base_url: &str, indexer: &Indexer, subscription: &Subscription,
     }
     let url = format!("{}/{ENDPOINT}?{}", base_url.trim_end_matches('/'), params.join("&"));
     let (mut stream, _) = tokio_tungstenite::connect_async(&url).await?;
-    info!(subscription = subscription.name, %url, "subscribed to jetstream");
+    info!(target: "lifecycle", subscription = subscription.name, %url, "subscribed to jetstream");
+    metrics::gauge!("jetstream_connected", "subscription" => subscription.name).set(1.0);
     *backoff = Duration::from_secs(1);
 
     // Cursor of the newest skipped event not yet saved.
@@ -96,8 +105,8 @@ async fn consume(base_url: &str, indexer: &Indexer, subscription: &Subscription,
             Message::Close(_) => return Ok(()),
             _ => continue,
         };
-        let event = match parse(&text) {
-            Ok(Some(event)) => event,
+        let (event, time) = match parse(&text) {
+            Ok(Some(parsed)) => parsed,
             Ok(None) => continue,
             Err(err) => {
                 warn!(error = %err, "skipping unparseable jetstream message");
@@ -107,7 +116,14 @@ async fn consume(base_url: &str, indexer: &Indexer, subscription: &Subscription,
         debug!(subscription = subscription.name, did = %event.did, kind = %event.kind, cursor = ?event.cursor, "event");
         // A database error ends the connection; reconnecting resumes from the
         // last saved cursor, so the event is retried.
-        if indexer.handle(&event, &cursor_key).await? {
+        if let Some(time) = time.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
+            let lag = chrono::Utc::now().signed_duration_since(time).num_milliseconds() as f64 / 1000.0;
+            metrics::gauge!("jetstream_lag_seconds", "subscription" => subscription.name).set(lag.max(0.0));
+        }
+        let applied = indexer.handle(&event, &cursor_key).await?;
+        let outcome = if applied { "applied" } else { "skipped" };
+        metrics::counter!("jetstream_events_total", "subscription" => subscription.name, "outcome" => outcome).increment(1);
+        if applied {
             unsaved = None; // handle() saved the cursor with its writes
         } else if let Some(cursor) = event.cursor {
             unsaved = Some(cursor);
@@ -148,6 +164,7 @@ struct Payload {
     kind: String,
     did: String,
     seq: Option<i64>,
+    time: Option<String>,
     operation: Option<String>,
     collection: Option<String>,
     rkey: Option<String>,
@@ -157,9 +174,9 @@ struct Payload {
     account: Option<AccountEvent>,
 }
 
-/// Converts a subscribeEvents message into an indexer event. Non-event
-/// messages yield None.
-fn parse(text: &str) -> anyhow::Result<Option<Event>> {
+/// Converts a subscribeEvents message into an indexer event and the time
+/// Jetstream received it (RFC 3339). Non-event messages yield None.
+fn parse(text: &str) -> anyhow::Result<Option<(Event, Option<String>)>> {
     let envelope: Envelope = serde_json::from_str(text)?;
     let Some(payload) = envelope.payload.filter(|_| envelope.kind == "message") else {
         return Ok(None);
@@ -170,7 +187,7 @@ fn parse(text: &str) -> anyhow::Result<Option<Event>> {
         ("commit", Some(operation), Some(collection), Some(rkey)) => Some(Commit { operation, collection, rkey, record: p.record, cid: p.cid }),
         _ => None,
     };
-    Ok(Some(Event { did: p.did, cursor: p.seq, kind, commit, identity: p.identity, account: p.account }))
+    Ok(Some((Event { did: p.did, cursor: p.seq, kind, commit, identity: p.identity, account: p.account }, p.time)))
 }
 
 #[cfg(test)]
@@ -181,19 +198,22 @@ mod tests {
     fn parses_subscribe_events_messages() {
         let commit = parse(r#"{"$type":"message","payload":{"$type":"network.bsky.jetstream.subscribeEvents#commit","cid":"bafy","collection":"club.voicebook.recording","did":"did:plc:a","operation":"create","record":{"work":"x"},"rev":"r","rkey":"k","seq":14,"time":"t"}}"#)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!((commit.kind.as_str(), commit.cursor), ("commit", Some(14)));
         let c = commit.commit.unwrap();
         assert_eq!((c.operation.as_str(), c.collection.as_str(), c.rkey.as_str()), ("create", RECORDING, "k"));
 
         let delete = parse(r#"{"$type":"message","payload":{"$type":"network.bsky.jetstream.subscribeEvents#commit","collection":"app.bsky.graph.follow","did":"did:plc:a","operation":"delete","rev":"r","rkey":"k","seq":20}}"#)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(delete.commit.unwrap().record.is_none());
 
         let account = parse(r#"{"$type":"message","payload":{"$type":"network.bsky.jetstream.subscribeEvents#account","account":{"active":false,"did":"did:plc:a","seq":2,"status":"deleted"},"did":"did:plc:a","seq":2}}"#)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(account.kind, "account");
         assert_eq!(account.account.unwrap().status.as_deref(), Some("deleted"));
 

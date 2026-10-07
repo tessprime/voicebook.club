@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{SqlitePool, Sqlite, Transaction};
-use tracing::{info, warn};
+use tracing::{Instrument, info, instrument, warn};
 
 use crate::atproto::{self, FOLLOW, RECORDING, Record};
 
@@ -123,6 +123,20 @@ impl Indexer {
         if !is_recording && !self.is_known_member(&event.did).await? {
             return Ok(false);
         }
+        let collection = event.commit.as_ref().map_or("", |c| c.collection.as_str());
+        let span = tracing::info_span!(
+            "index event",
+            otel.name = format!("index {} {collection}", event.kind).trim_end().to_owned(),
+            did = %event.did,
+            kind = %event.kind,
+            collection,
+            cursor = event.cursor,
+        );
+        self.apply(event, cursor_key).instrument(span).await?;
+        Ok(true)
+    }
+
+    async fn apply(&self, event: &Event, cursor_key: &str) -> Result<()> {
         // Network work happens before the transaction opens, so the write lock
         // is never held across an HTTP request.
         let snapshot = if self.is_new_member(event).await? {
@@ -197,11 +211,12 @@ impl Indexer {
                 .await?;
         }
         tx.commit().await?;
-        Ok(true)
+        Ok(())
     }
 
     /// Re-fetches every member's recordings and follows from their PDS and
     /// replaces what the index holds for them.
+    #[instrument(skip(self))]
     pub async fn reindex_all(&self) -> Result<usize> {
         let dids: Vec<String> = sqlx::query_scalar("SELECT did FROM members").fetch_all(&self.db).await?;
         for did in &dids {
@@ -218,7 +233,15 @@ impl Indexer {
     /// well-formed recording becomes (or stays) a member, with its recordings
     /// and follows replaced by the snapshot. Lets a client announce a new
     /// member without waiting for Jetstream. Returns whether `did` is a member.
+    #[instrument(skip(self))]
     pub async fn refresh_member(&self, did: &str) -> Result<bool> {
+        let start = std::time::Instant::now();
+        let result = self.refresh_member_inner(did).await;
+        metrics::histogram!("member_refresh_duration_seconds").record(start.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn refresh_member_inner(&self, did: &str) -> Result<bool> {
         let snapshot = self.fetch_snapshot(did).await;
         let has_recordings = snapshot
             .recordings
@@ -291,6 +314,7 @@ impl Indexer {
     /// Fetches a member's identity, recordings and follows. Failures are
     /// logged and yield a partial snapshot: a broken PDS must not stall the
     /// stream, and a later reindex fills the gaps.
+    #[instrument(skip(self))]
     async fn fetch_snapshot(&self, did: &str) -> Snapshot {
         let identity = match self.client.resolve(did).await {
             Ok(identity) => Some(identity),

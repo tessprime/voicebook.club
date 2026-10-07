@@ -12,6 +12,9 @@
 #   :2582  plc        did-method-plc, built from a pinned upstream commit
 #   :2583  pds        official Bluesky PDS image
 #   :6008  jetstream  official Jetstream image, reading the PDS firehose
+#   :3000  grafana    observability stack (grafana/otel-lgtm): OTLP in on
+#                     :4317 (gRPC) / :4318 (HTTP), Tempo, Loki, Prometheus,
+#                     which scrapes the backend's /metrics on :8080
 
 name: voicebook-localnet
 
@@ -118,7 +121,20 @@ services:
       pds:
         condition: service_healthy
 
+  # Grafana, Tempo (traces), Loki (logs), Prometheus (metrics) and an
+  # OpenTelemetry Collector in one container, for local development only.
+  observability:
+    image: grafana/otel-lgtm:0.35.0
+    network_mode: host
+    environment:
+      # Anonymous users are Admin in this image; keep Grafana off the network.
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+    volumes:
+      - observability-data:/data
+      - ./observability/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+
 volumes:
   postgres-data:
   pds-data:
   jetstream-data:
+  observability-data:

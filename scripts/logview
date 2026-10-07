@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Pretty-prints the backend's JSON-lines logs (see docs/design/logging.md).
+
+    tail -f logs/backend.log | scripts/logview
+    scripts/logview logs/backend.log --level warn
+    scripts/logview logs/backend.log --trace 5b8efff798038103d269b633813fc60c
+
+Each line becomes `HH:MM:SS.mmm LEVEL target: message key=value ...`.
+Lines that aren't JSON are printed unchanged.
+"""
+
+import argparse
+import json
+import sys
+
+LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]
+COLORS = {"TRACE": "2", "DEBUG": "2", "INFO": "32", "WARN": "33", "ERROR": "31;1"}
+FIXED = ("timestamp", "level", "target", "message", "trace_id", "span_id")
+
+
+def render(entry, color):
+    level = entry.get("level", "?")
+    timestamp = entry.get("timestamp", "")
+    clock = timestamp[11:23] if len(timestamp) >= 23 else timestamp
+    fields = " ".join(f"{k}={format_value(v)}" for k, v in entry.items() if k not in FIXED)
+    trace = f" trace={entry['trace_id'][:8]}" if "trace_id" in entry else ""
+    head = f"{level:<5}"
+    if color:
+        head = f"\033[{COLORS.get(level, '0')}m{head}\033[0m"
+        fields = f"\033[2m{fields}{trace}\033[0m"
+    else:
+        fields += trace
+    return f"{clock} {head} {entry.get('target', '')}: {entry.get('message', '')} {fields}".rstrip()
+
+
+def format_value(value):
+    if isinstance(value, str):
+        return json.dumps(value) if (" " in value or not value) else value
+    return json.dumps(value)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("file", nargs="?", help="log file (default: stdin)")
+    parser.add_argument("--level", default="trace", choices=[l.lower() for l in LEVELS], help="minimum level")
+    parser.add_argument("--trace", help="only lines from this trace ID")
+    parser.add_argument("--no-color", action="store_true")
+    args = parser.parse_args()
+
+    minimum = LEVELS.index(args.level.upper())
+    color = sys.stdout.isatty() and not args.no_color
+    source = open(args.file, encoding="utf-8") if args.file else sys.stdin
+    try:
+        for line in source:
+            line = line.rstrip("\n")
+            try:
+                entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    raise ValueError
+            except ValueError:
+                print(line, flush=True)
+                continue
+            if LEVELS.index(entry.get("level", "INFO")) < minimum if entry.get("level") in LEVELS else False:
+                continue
+            if args.trace and entry.get("trace_id") != args.trace:
+                continue
+            print(render(entry, color), flush=True)
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+
+
+if __name__ == "__main__":
+    main()

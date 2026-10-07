@@ -595,7 +595,7 @@ The UI should provide understandable errors for at least:
 - Reindex failure.
 - Recording unavailable from PDS.
 
-Developer logs should include structured context such as:
+Logs follow [`design/logging.md`](design/logging.md). Developer logs should include structured context such as:
 
 - DID.
 - AT URI.
@@ -608,31 +608,9 @@ Never log secrets or access tokens.
 
 ---
 
-## 25. Local Logging
+## 25. Logging, Tracing and Metrics
 
-Use Rust `tracing`.
-
-Initial log levels:
-
-```text
-INFO
-- server start
-- login complete
-- recording indexed
-- reindex start/end
-
-WARN
-- transient PDS failures
-- unavailable blobs
-- stale handles
-
-ERROR
-- OAuth failures
-- record creation failures
-- database failures
-```
-
-Production metrics and alerting are out of scope for this document.
+See [`design/logging.md`](design/logging.md): OTLP traces and logs, a stderr diagnostic channel, Prometheus metrics, and the local Grafana stack.
 
 ---
 
@@ -702,7 +680,7 @@ voicebook.club/
 ### Milestone 7 — Real Network Smoke Test
 
 - Sign in with real Bluesky accounts.
-- Backend against a public Jetstream and `plc.directory` (`--environment production`).
+- Backend against a public Jetstream and `plc.directory` (`--environment local-bluesky`).
 
 ---
 
@@ -783,7 +761,7 @@ If those pieces work cleanly together locally, production hardening can follow w
 
 ## 31. Local ATmosphere and Environments
 
-The backend reads its settings from `backend/environments/<name>.json`: `development.json` targets the local network below, `production.json` the real Bluesky network (`plc.directory`, a public Jetstream). Each uses its own SQLite file.
+The backend reads its settings from `backend/environments/<name>.json`: `development.json` targets the local network below, `local-bluesky.json` the real Bluesky network (`plc.directory`, a public Jetstream), and `droplet.json` / `app-platform.json` are for the container image (see `deploy/README.md`). Each uses its own SQLite file.
 
 Development runs against a local ATProto network in `dev/localnet/`, all unmodified upstream software:
 

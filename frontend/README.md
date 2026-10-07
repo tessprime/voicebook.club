@@ -8,15 +8,16 @@ PDS, and reads calendars, history and friends' activity from the backend.
 nvm use
 npm install
 npm run dev          # http://127.0.0.1:5173 (not "localhost": OAuth loopback redirects need the IP)
-npm run dev:production  # same, but against the real Bluesky network (.env.production)
+npm run dev:bluesky  # same, but against the real Bluesky network (.env.production;
+                     # pair with the backend's local-bluesky environment)
 npm run test:e2e     # Playwright; needs dev/localnet up and seeded, and a development backend
-                     # (VOICEBOOK_API, default http://127.0.0.1:3000); runs its own Vite on :5174
+                     # (VOICEBOOK_API, default http://127.0.0.1:8080); runs its own Vite on :5174
 ```
 
 `.env.development` points identity resolution at the local network
 (`VITE_PLC_URL`, `VITE_HANDLE_RESOLVER`); `.env.production` at the real
 network. Pair each with the backend environment of the same name. `/api` is proxied to the backend on
-`127.0.0.1:3000`.
+`127.0.0.1:8080`.
 
 Notes:
 

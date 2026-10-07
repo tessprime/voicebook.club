@@ -1,36 +1,138 @@
 //! Read-only JSON API over the index. Everything it serves is public ATProto
 //! data, so no endpoint requires authentication.
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use std::time::Instant;
+
+use axum::extract::{MatchedPath, Path, Query, Request, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
+use tower_http::trace::TraceLayer;
 use tracing::error;
 
 use crate::atproto;
 use crate::indexer::Indexer;
 use crate::jetstream;
+use crate::telemetry;
+use crate::web;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
     pub indexer: Indexer,
+    pub metrics: PrometheusHandle,
+    pub public_url: Option<String>,
 }
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+pub struct RouterOptions {
+    /// Serve `/metrics` on this router (otherwise it has its own listener).
+    pub metrics: bool,
+    /// Serve the built frontend from this directory.
+    pub frontend_dir: Option<std::path::PathBuf>,
+}
+
+pub fn router(state: AppState, options: RouterOptions) -> Router {
+    let router = Router::new()
         .route("/api/members", get(members))
         .route("/api/members/{did}/refresh", post(refresh_member))
         .route("/api/users/{did}/recordings", get(recordings))
         .route("/api/users/{did}/calendar", get(calendar))
         .route("/api/users/{did}/friends/activity", get(friends_activity))
         .route("/api/dev/reindex", post(reindex))
-        .with_state(state)
+        // Layers wrap only the routes above: each API request gets a trace
+        // span, a latency measurement and an x-trace-id response header.
+        .layer(middleware::from_fn(request_telemetry))
+        .layer(TraceLayer::new_for_http().make_span_with(request_span).on_request(()).on_response(()).on_failure(()))
+        // Polled frequently; kept out of traces and request metrics.
+        .route("/api/health", get(health))
+        .route("/client-metadata.json", get(web::client_metadata));
+    let router = if options.metrics { router.route("/metrics", get(metrics)) } else { router };
+    let router = match options.frontend_dir {
+        Some(dir) => router.fallback(move |req: Request| async move { web::frontend(&dir, req).await }),
+        None => router,
+    };
+    router.with_state(state)
+}
+
+/// `/metrics` alone, for a separate, non-public listener.
+pub fn metrics_router(state: AppState) -> Router {
+    Router::new().route("/metrics", get(metrics)).with_state(state)
+}
+
+/// The server span for a request, with OpenTelemetry's HTTP attribute names.
+fn request_span(req: &Request) -> tracing::Span {
+    let method = req.method();
+    let route = req.extensions().get::<MatchedPath>().map_or("unmatched", |p| p.as_str());
+    tracing::info_span!(
+        "request",
+        otel.name = format!("{method} {route}"),
+        otel.kind = "server",
+        otel.status_code = tracing::field::Empty,
+        http.request.method = %method,
+        http.route = route,
+        url.path = req.uri().path(),
+        "http.request.header.x-request-id" = request_id(req),
+        http.response.status_code = tracing::field::Empty,
+    )
+}
+
+/// Runs inside the request span: records the response status on it, the
+/// latency histogram, and returns the trace ID so a reported error can be
+/// found.
+async fn request_telemetry(req: Request, next: Next) -> Response {
+    let request_id = request_id(&req).map(str::to_owned);
+    let method = req.method().to_string();
+    let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_owned(), |p| p.as_str().to_owned());
+    let start = Instant::now();
+    let mut response = next.run(req).await;
+    let status = response.status();
+    let elapsed = start.elapsed();
+    // The local file's record of the request (see docs/design/logging.md);
+    // OTLP leaves it out, since the request span carries the same.
+    tracing::info!(
+        target: "access",
+        method = %method,
+        route = %route,
+        status = status.as_u16(),
+        duration_ms = elapsed.as_secs_f64() * 1000.0,
+        request_id = request_id.as_deref(),
+        "request"
+    );
+    let span = tracing::Span::current();
+    span.record("http.response.status_code", i64::from(status.as_u16()));
+    if status.is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    metrics::histogram!(
+        "http_server_request_duration_seconds",
+        "method" => method,
+        "route" => route,
+        "status" => status.as_u16().to_string(),
+    )
+    .record(elapsed.as_secs_f64());
+    if let Some(value) = telemetry::current_trace_id().and_then(|id| HeaderValue::from_str(&id).ok()) {
+        response.headers_mut().insert("x-trace-id", value);
+    }
+    response
+}
+
+/// nginx's `$request_id`, which it also writes to its access log: ties an
+/// nginx line to this request. Only ID-shaped values are kept, so a client
+/// reaching the backend directly can't put arbitrary text in the logs.
+fn request_id(req: &Request) -> Option<&str> {
+    let id = req.headers().get("x-request-id")?.to_str().ok()?;
+    let valid = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    valid.then_some(id)
+}
+
+async fn metrics(State(state): State<AppState>) -> String {
+    state.metrics.render()
 }
 
 pub struct ApiError(anyhow::Error);
@@ -249,4 +351,26 @@ async fn refresh_member(State(state): State<AppState>, Path(did): Path<String>) 
 async fn reindex(State(state): State<AppState>) -> ApiResult<serde_json::Value> {
     let members = state.indexer.reindex_all().await?;
     Ok(Json(json!({ "reindexedMembers": members })))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+
+    use super::*;
+
+    fn with_request_id(id: &str) -> Request {
+        Request::builder().header("x-request-id", id).body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn request_id_accepts_only_id_shaped_values() {
+        let nginx = "4c7f21b9e0d3a5f86b2e9c1d0a7f3e58";
+        assert_eq!(request_id(&with_request_id(nginx)), Some(nginx));
+        assert_eq!(request_id(&with_request_id("abc-123_DEF")), Some("abc-123_DEF"));
+        assert_eq!(request_id(&with_request_id("has spaces")), None);
+        assert_eq!(request_id(&with_request_id(&"a".repeat(65))), None);
+        assert_eq!(request_id(&with_request_id("")), None);
+        assert_eq!(request_id(&Request::builder().body(Body::empty()).unwrap()), None);
+    }
 }

@@ -1,8 +1,8 @@
 {
   "bind": "127.0.0.1:8080",
-  "database": "data/development.sqlite",
-  "plcUrl": "http://localhost:2582",
-  "jetstreamUrl": "ws://localhost:6008",
+  "database": "data/local-bluesky.sqlite",
+  "plcUrl": "https://plc.directory",
+  "jetstreamUrl": "wss://jetstream.us-east.bsky.network",
   "telemetry": {
     "otlpEndpoint": "http://localhost:4318",
     "stderr": "warn,lifecycle=info",

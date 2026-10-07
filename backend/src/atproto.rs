@@ -1,12 +1,19 @@
 //! Minimal read-only ATProto client: DID resolution and record listing. All
 //! the data it touches is public, so it never needs credentials.
 
+use std::time::Instant;
+
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tracing::{Instrument, instrument};
 
 pub const RECORDING: &str = "club.voicebook.recording";
 pub const FOLLOW: &str = "app.bsky.graph.follow";
+
+/// listRecords page size (the protocol's maximum).
+const PAGE_SIZE: usize = 100;
 
 #[derive(Clone)]
 pub struct Client {
@@ -64,6 +71,7 @@ impl Client {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn resolve(&self, did: &str) -> Result<Identity> {
         let url = if did.starts_with("did:plc:") {
             format!("{}/{did}", self.plc_url)
@@ -72,45 +80,66 @@ impl Client {
         } else {
             bail!("unsupported DID method: {did}");
         };
-        let doc: DidDocument = self
-            .http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()
-            .with_context(|| format!("resolving {did}"))?
-            .json()
-            .await?;
+        let doc: DidDocument = self.get_json("resolve_did", &url, &[]).await.with_context(|| format!("resolving {did}"))?;
         identity_from_doc(doc).with_context(|| format!("DID document for {did}"))
     }
 
     /// Lists every record in one collection of a repo, following pagination.
+    #[instrument(skip(self, pds_url))]
     pub async fn list_records(&self, pds_url: &str, did: &str, collection: &str) -> Result<Vec<Record>> {
         let url = format!("{}/xrpc/com.atproto.repo.listRecords", pds_url.trim_end_matches('/'));
         let mut records = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let mut query = vec![("repo", did), ("collection", collection), ("limit", "100")];
+            let limit = PAGE_SIZE.to_string();
+            let mut query = vec![("repo", did), ("collection", collection), ("limit", limit.as_str())];
             if let Some(c) = &cursor {
                 query.push(("cursor", c));
             }
             let page: ListRecords = self
-                .http
-                .get(&url)
-                .query(&query)
-                .send()
-                .await?
-                .error_for_status()
-                .with_context(|| format!("listRecords {did} {collection}"))?
-                .json()
-                .await?;
-            let done = page.records.is_empty() || page.cursor.is_none();
+                .get_json("list_records", &url, &query)
+                .await
+                .with_context(|| format!("listRecords {did} {collection}"))?;
+            // A PDS returns a cursor even on the last page; a short page means
+            // there's nothing more, which saves a request per collection.
+            let done = page.records.len() < PAGE_SIZE || page.cursor.is_none();
             records.extend(page.records.into_iter().map(|r| Record { uri: r.uri, cid: r.cid, value: r.value }));
             if done {
                 return Ok(records);
             }
             cursor = page.cursor;
         }
+    }
+}
+
+impl Client {
+    /// One GET with a client span and the outbound latency metric.
+    async fn get_json<T: DeserializeOwned>(&self, operation: &'static str, url: &str, query: &[(&str, &str)]) -> Result<T> {
+        let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
+        let span = tracing::info_span!(
+            "atproto request",
+            otel.name = operation,
+            otel.kind = "client",
+            otel.status_code = tracing::field::Empty,
+            http.request.method = "GET",
+            server.address = %host,
+            http.response.status_code = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let result: Result<T> = async {
+            let response = self.http.get(url).query(query).send().await?;
+            tracing::Span::current().record("http.response.status_code", i64::from(response.status().as_u16()));
+            Ok(response.error_for_status()?.json().await?)
+        }
+        .instrument(span.clone())
+        .await;
+        if result.is_err() {
+            span.record("otel.status_code", "ERROR");
+        }
+        let outcome = if result.is_ok() { "ok" } else { "error" };
+        metrics::histogram!("atproto_request_duration_seconds", "operation" => operation, "outcome" => outcome)
+            .record(start.elapsed().as_secs_f64());
+        result
     }
 }
 

@@ -1,13 +1,15 @@
 {
-  "bind": "127.0.0.1:8080",
-  "database": "data/development.sqlite",
+  "bind": "127.0.0.1:8091",
+  "metricsBind": "127.0.0.1:9101",
+  "database": "/data/voicebook.sqlite",
   "plcUrl": "http://localhost:2582",
   "jetstreamUrl": "ws://localhost:6008",
+  "frontendDir": "/app/frontend",
   "telemetry": {
     "otlpEndpoint": "http://localhost:4318",
     "stderr": "warn,lifecycle=info",
     "file": {
-      "directory": "../logs",
+      "directory": "/logs",
       "retentionDays": 3
     }
   }

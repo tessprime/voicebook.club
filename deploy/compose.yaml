@@ -1,0 +1,29 @@
+# Runs the image locally the way a Droplet would (environment "droplet"),
+# against the real Bluesky network: http://127.0.0.1:8090.
+#
+#   deploy/build.sh && docker compose -f deploy/compose.yaml up
+#
+# Data and logs persist in named volumes. /metrics (port 9100) is deliberately
+# not published.
+name: voicebook
+
+services:
+  voicebook:
+    image: voicebook:latest
+    command: ["--environment", "droplet"]
+    ports:
+      - 127.0.0.1:8090:8080
+    volumes:
+      - data:/data
+      - logs:/logs
+    restart: unless-stopped
+    # stderr (warnings, errors, lifecycle) via Docker's log driver; cap it.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:
+  logs:

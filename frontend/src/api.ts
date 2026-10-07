@@ -23,9 +23,20 @@ export type PracticeDay = {
   durationMs: number | null
 }
 
+/**
+ * A failed backend request. The trace ID (from the x-trace-id header) finds
+ * the request in Grafana; error messages show it so a report can be traced.
+ */
+export class BackendError extends Error {
+  constructor(path: string, res: Response) {
+    const traceId = res.headers.get('x-trace-id')
+    super(`${path}: ${res.status} ${res.statusText}${traceId ? ` (ref ${traceId})` : ''}`)
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path)
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${res.statusText}`)
+  if (!res.ok) throw new BackendError(path, res)
   return res.json() as Promise<T>
 }
 
@@ -49,7 +60,7 @@ export function friendsActivity(did: string, limit = 50): Promise<Recording[]> {
  */
 export async function refreshMember(did: string): Promise<boolean> {
   const res = await fetch(`/api/members/${encodeURIComponent(did)}/refresh`, { method: 'POST' })
-  if (!res.ok) throw new Error(`refresh: ${res.status} ${res.statusText}`)
+  if (!res.ok) throw new BackendError('refresh', res)
   return ((await res.json()) as { member: boolean }).member
 }
 

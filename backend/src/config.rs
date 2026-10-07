@@ -8,17 +8,76 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    /// The environment's name (the file name without `.json`); reported as
+    /// the `deployment.environment.name` telemetry attribute.
+    #[serde(skip)]
+    pub environment: String,
     pub bind: SocketAddr,
     /// SQLite file, relative to the working directory.
     pub database: PathBuf,
     pub plc_url: String,
     pub jetstream_url: String,
+    /// The site's public origin (e.g. `https://voicebook.club`), used for the
+    /// OAuth client metadata. If unset, it's derived from each request's
+    /// `Host` header, which the proxy in front must pass through.
+    pub public_url: Option<String>,
+    /// The built frontend (`frontend/dist`), served at `/`. Unset in
+    /// development, where Vite serves it.
+    pub frontend_dir: Option<PathBuf>,
+    /// A separate listener for `/metrics`, kept off the public port. If
+    /// unset, `/metrics` is served on `bind` (local development).
+    pub metrics_bind: Option<SocketAddr>,
+    #[serde(default)]
+    pub telemetry: Telemetry,
+}
+
+/// See docs/design/logging.md.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Telemetry {
+    /// Base URL of an OTLP/HTTP collector (e.g. `http://localhost:4318`).
+    /// Traces and logs are sent there; None disables OTLP export.
+    pub otlp_endpoint: Option<String>,
+    /// Filter for the stderr diagnostic channel, in `RUST_LOG` syntax.
+    /// `VOICEBOOK_STDERR` overrides it for a session.
+    #[serde(default = "default_stderr_filter")]
+    pub stderr: String,
+    /// The local JSON mirror of every log event plus per-request access
+    /// lines, for debugging when OTLP isn't available. None disables it.
+    pub file: Option<FileLog>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileLog {
+    /// Directory for `backend-<environment>.<date>.jsonl` files, relative to
+    /// the working directory.
+    pub directory: PathBuf,
+    /// Files rotate daily; this many days are kept.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: usize,
+}
+
+fn default_retention_days() -> usize {
+    3
+}
+
+fn default_stderr_filter() -> String {
+    "warn,lifecycle=info".into()
+}
+
+impl Default for Telemetry {
+    fn default() -> Self {
+        Self { otlp_endpoint: None, stderr: default_stderr_filter(), file: None }
+    }
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut config: Self = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.environment = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(config)
     }
 
     /// Picks the environment from `--environment <name>` (default
@@ -46,7 +105,7 @@ mod tests {
 
     #[test]
     fn checked_in_environments_parse() {
-        for name in ["development", "production"] {
+        for name in ["development", "local-bluesky", "droplet", "app-platform"] {
             Config::load(Path::new(&format!("environments/{name}.json"))).unwrap();
         }
     }

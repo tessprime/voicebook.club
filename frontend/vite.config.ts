@@ -11,7 +11,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       // The backend; e2e tests point this at a development backend.
-      '/api': process.env.VOICEBOOK_API ?? 'http://127.0.0.1:3000',
+      '/api': process.env.VOICEBOOK_API ?? 'http://127.0.0.1:8080',
     },
   },
 })

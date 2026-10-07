@@ -1,0 +1,11 @@
+{
+  "bind": "0.0.0.0:8080",
+  "metricsBind": "0.0.0.0:9100",
+  "database": "/data/voicebook.sqlite",
+  "plcUrl": "https://plc.directory",
+  "jetstreamUrl": "wss://jetstream.us-east.bsky.network",
+  "frontendDir": "/app/frontend",
+  "telemetry": {
+    "stderr": "info"
+  }
+}

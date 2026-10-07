@@ -9,8 +9,10 @@ Docker Compose. All three are unmodified upstream software:
 | 2582 | plc | [`did-method-plc`](https://github.com/did-method-plc/did-method-plc), built from a pinned commit (its published image is private) |
 | 2583 | pds | `ghcr.io/bluesky-social/pds` (official) |
 | 6008 | jetstream | `ghcr.io/bluesky-social/jetstream` (official), reading the PDS firehose |
+| 3000 | observability | `grafana/otel-lgtm`: Grafana, Tempo, Loki, Prometheus and an OpenTelemetry Collector (OTLP on 4317/4318). Prometheus scrapes the backend's `/metrics` on :8080 (`observability/prometheus.yaml`). See [`docs/design/logging.md`](../../docs/design/logging.md). |
 
-Everything uses host networking, so `localhost` means the same thing to the
+Grafana listens on 127.0.0.1 only, since anonymous users are admins in this
+image. Everything uses host networking, so `localhost` means the same thing to the
 containers, the backend and the browser. DID documents name the PDS as
 `http://localhost:2583`, and every consumer has to be able to reach it there.
 
