@@ -37,6 +37,10 @@ pub struct FetchPolicy {
 /// An HTTP client that enforces `policy` on every connection and redirect.
 pub fn client(policy: FetchPolicy) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
+        // Never via a proxy from the environment (HTTPS_PROXY etc., which
+        // reqwest honors by default): the proxy would resolve hostnames, so
+        // the public-only resolver below would never run.
+        .no_proxy()
         .timeout(TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .redirect(redirect::Policy::custom(move |attempt| {
@@ -133,9 +137,10 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || (segments[0] & 0xfe00) == 0xfc00 // unique local (fc00::/7)
         || (segments[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
+        || (segments[0] & 0xffc0) == 0xfec0 // site-local, deprecated (fec0::/10)
         || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
         || (segments[0] == 0x2001 && segments[1] == 0) // Teredo
-        || (segments[0] == 0x64 && segments[1] == 0xff9b) // NAT64
+        || (segments[0] == 0x64 && segments[1] == 0xff9b) // NAT64 (64:ff9b::/32, incl. local-use 64:ff9b:1::/48)
         || segments[..6].iter().all(|&s| s == 0)) // IPv4-compatible (deprecated)
 }
 
@@ -159,7 +164,7 @@ mod tests {
             "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0",
             "255.255.255.255", "224.0.0.1", "240.0.0.1", "192.0.2.1", "198.18.0.1", "::1", "::", "fc00::1",
             "fd12:3456::1", "fe80::1", "ff02::1", "2001:db8::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254",
-            "2002:7f00:0001::1", "2002:a9fe:a9fe::1", "64:ff9b::a9fe:a9fe", "2001:0:4136:e378::1",
+            "2002:7f00:0001::1", "2002:a9fe:a9fe::1", "64:ff9b::a9fe:a9fe", "2001:0:4136:e378::1", "fec0::1", "64:ff9b:1::a00:1",
         ] {
             assert!(!is_public(ip(internal)), "{internal} should not be public");
         }

@@ -479,6 +479,12 @@ async fn create_session(State(state): State<AppState>, req: Request) -> Result<R
     };
     let did = match state.auth.verify(token, |did| state.access.allows(did)).await {
         Ok(auth::Verdict::Verified(did)) => did,
+        Ok(auth::Verdict::Busy) => {
+            tracing::warn!("sign-in resolution budget spent; refusing until the next minute");
+            let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too_many_sign_ins" }))).into_response();
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+            return Ok(response);
+        }
         Ok(auth::Verdict::NotAdmitted { unverified_did }) => {
             // Unverified: the signature isn't checked for accounts that aren't
             // admitted, so this is only what the token claimed.
@@ -492,7 +498,7 @@ async fn create_session(State(state): State<AppState>, req: Request) -> Result<R
     };
     let session = auth::create_session(&state.db, &did).await?;
     tracing::info!(did, "session created");
-    let cookie = session_cookie_header(&session, auth::SESSION_DAYS * 24 * 3600, secure_cookie(&req));
+    let cookie = session_cookie_header(&session, auth::SESSION_DAYS * 24 * 3600, secure_cookie(req.headers()));
     let mut response = Json(SessionInfo::new(&state, Some(did))).into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
     Ok(response)
@@ -507,31 +513,41 @@ async fn delete_session(State(state): State<AppState>, req: Request) -> Result<R
         auth::delete_session(&state.db, token).await?;
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response.headers_mut().insert(header::SET_COOKIE, session_cookie_header("", 0, secure_cookie(&req)));
+    response.headers_mut().insert(header::SET_COOKIE, session_cookie_header("", 0, secure_cookie(req.headers())));
     Ok(response)
 }
 
+/// The session token from the request's cookies. Over HTTPS only the
+/// `__Host-` cookie counts: a plain-named one could have been set by another
+/// subdomain.
 fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    let name = session_cookie_name(secure_cookie(headers));
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|pair| pair.trim().strip_prefix(auth::SESSION_COOKIE)?.strip_prefix('='))
+        .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
         .filter(|token| !token.is_empty())
 }
 
+fn session_cookie_name(secure: bool) -> &'static str {
+    if secure { auth::SESSION_COOKIE } else { auth::SESSION_COOKIE_LOOPBACK }
+}
+
 fn session_cookie_header(token: &str, max_age_secs: i64, secure: bool) -> HeaderValue {
+    let name = session_cookie_name(secure);
     let secure = if secure { "; Secure" } else { "" };
-    let value = format!("{}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs}{secure}", auth::SESSION_COOKIE);
+    let value = format!("{name}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs}{secure}");
     HeaderValue::from_str(&value).expect("cookie is ASCII")
 }
 
-/// `Secure` everywhere except plain-HTTP loopback (local development), where
-/// browsers wouldn't send it back. Deployed, TLS ends in front of the
-/// container, so the request itself always looks like plain HTTP.
-fn secure_cookie(req: &Request) -> bool {
-    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
+/// `Secure` (and the `__Host-` name) everywhere except plain-HTTP loopback
+/// (local development), where browsers wouldn't accept it. Deployed, TLS ends
+/// in front of the container, so the request itself always looks like plain
+/// HTTP; the `Host` decides.
+fn secure_cookie(headers: &HeaderMap) -> bool {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let hostname = host.rsplit_once(':').map_or(host, |(name, port)| if port.bytes().all(|b| b.is_ascii_digit()) { name } else { host });
     !matches!(hostname, "localhost" | "127.0.0.1" | "[::1]")
 }
@@ -544,6 +560,34 @@ mod tests {
 
     fn with_request_id(id: &str) -> Request {
         Request::builder().header("x-request-id", id).body(Body::empty()).unwrap()
+    }
+
+    fn cookie_headers(host: &str, cookie: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+        headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+        headers
+    }
+
+    #[test]
+    fn https_reads_only_the_host_prefixed_cookie() {
+        // A plain-named cookie tossed from another subdomain is ignored.
+        let tossed = cookie_headers("voicebook.club", "vb_session=attacker; __Host-vb_session=mine");
+        assert_eq!(session_cookie(&tossed), Some("mine"));
+        assert_eq!(session_cookie(&cookie_headers("voicebook.club", "vb_session=attacker")), None);
+        // Local development over plain HTTP uses the plain name.
+        assert_eq!(session_cookie(&cookie_headers("127.0.0.1:5173", "vb_session=dev")), Some("dev"));
+        assert_eq!(session_cookie(&cookie_headers("127.0.0.1:5173", "__Host-vb_session=x")), None);
+        // Names that merely start with ours don't count.
+        assert_eq!(session_cookie(&cookie_headers("127.0.0.1", "vb_session_old=x")), None);
+    }
+
+    #[test]
+    fn cookie_attributes_follow_the_host() {
+        let https = session_cookie_header("t", 60, true);
+        assert_eq!(https, "__Host-vb_session=t; Path=/; HttpOnly; SameSite=Strict; Max-Age=60; Secure");
+        let local = session_cookie_header("t", 60, false);
+        assert_eq!(local, "vb_session=t; Path=/; HttpOnly; SameSite=Strict; Max-Age=60");
     }
 
     #[test]

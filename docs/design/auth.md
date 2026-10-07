@@ -29,7 +29,7 @@ browser                         user's PDS                       Voicebook backe
    │ getServiceAuth(aud, lxm, exp=60s) ─▶│                          │
    │◀──────────────── JWT ───────────────│                          │
    │ POST /api/session  Authorization: Bearer <JWT> ───────────────▶│ verify (below)
-   │◀────────── Set-Cookie: vb_session=…; HttpOnly; SameSite=Strict │
+   │◀────────── Set-Cookie: __Host-vb_session=…; HttpOnly; SameSite=Strict │
 ```
 
 - **Audience:** `<serviceDid>#voicebook`. `serviceDid` is set per
@@ -72,14 +72,25 @@ The backend accepts a token only if all of these hold:
 Failures return 401 and log the reason as a warning; the response doesn't say
 which check failed.
 
+DID resolutions during sign-in are budgeted globally: at most 60 per minute
+across all callers. Beyond that, `POST /api/session` answers 429 with
+`Retry-After: 60`, before anything is fetched; the frontend keeps the user's
+OAuth session and asks them to reload shortly. This bounds how many outbound
+requests unauthenticated callers can cause (relevant on open instances, where
+every well-formed token passes the allowlist check).
+
 ### Sessions
 
-- A random 256-bit token in the `vb_session` cookie; SQLite stores only its
+- A random 256-bit token in the session cookie; SQLite stores only its
   SHA-256 hash, with the DID and an expiry **30 days** out.
-- Cookie: `HttpOnly; SameSite=Strict; Path=/`, plus `Secure` everywhere
-  except plain-HTTP loopback (local development). Behind a TLS-terminating
-  proxy the request looks like plain HTTP, so `Secure` is decided by the
-  `Host`: the proxy must pass it through.
+- Cookie: `__Host-vb_session` with `HttpOnly; SameSite=Strict; Path=/; Secure`.
+  The `__Host-` prefix means browsers accept it only from this exact host,
+  so another subdomain can't plant a session (cookie tossing), and over HTTPS
+  the server reads only that name. On plain-HTTP loopback (local
+  development) it's `vb_session` without `Secure`, since `__Host-` requires
+  it. Behind a TLS-terminating proxy the request looks like plain HTTP, so
+  which form is used is decided by the `Host`: the proxy must pass it
+  through.
 - `DELETE /api/session` signs out of the backend; the frontend also signs out
   of the PDS. Expired sessions are deleted periodically.
 - Sessions are the one thing in SQLite that isn't rebuilt from ATProto, but

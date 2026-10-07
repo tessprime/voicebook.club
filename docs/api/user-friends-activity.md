@@ -14,7 +14,7 @@ follows (`app.bsky.graph.follow` records).
 
 ```http
 GET /api/users/did%3Aplc%3Awzraxbnzzz4fxt72jhvuswbb/friends/activity?limit=50
-Cookie: vb_session=…
+Cookie: __Host-vb_session=…
 ```
 
 `limit` and `before` page as described in [Paging](README.md#paging).

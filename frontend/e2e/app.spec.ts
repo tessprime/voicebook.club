@@ -290,3 +290,24 @@ test('the CSP blocks injected inline script, and the violation tracker sees it',
   expect(violations.some((v) => v.startsWith('script-src'))).toBe(true)
   await page.evaluate(() => sessionStorage.removeItem('csp-violations')) // expected; don't fail afterEach
 })
+
+test('a busy backend (429) keeps the OAuth session, and a reload signs in', async ({ page }) => {
+  await page.route('**/api/session', (route) =>
+    route.request().method() === 'POST'
+      ? route.fulfill({ status: 429, headers: { 'retry-after': '60' }, json: { error: 'too_many_sign_ins' } })
+      : route.continue(),
+  )
+  await page.goto('/')
+  await page.getByLabel('Your Bluesky handle').fill('carol.test')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await page.waitForURL(/\/oauth\/authorize/)
+  await page.locator('input[name=password]').fill('password')
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await page.getByRole('button', { name: 'Authorize' }).click()
+  await expect(page.getByRole('alert')).toContainText('reload in a minute')
+
+  // The minute passes; no new OAuth sign-in needed.
+  await page.unroute('**/api/session')
+  await page.reload()
+  await expect(page.locator('.account')).toContainText('@carol.test')
+})

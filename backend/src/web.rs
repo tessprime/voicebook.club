@@ -28,7 +28,21 @@ pub async fn client_metadata(State(state): State<AppState>, req: Request) -> Res
     let Some(origin) = state.public_url.clone().or_else(|| origin_from_host(&req)) else {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid Host header" }))).into_response();
     };
-    Json(client_metadata_document(&origin)).into_response()
+    document(client_metadata_document(&origin), state.public_url.is_none())
+}
+
+/// A JSON document. If it was derived from the request's `Host` (no
+/// `publicUrl` configured), it must never be stored by a cache that might key
+/// it without the host: a forged `Host` would otherwise poison it for
+/// everyone.
+fn document(body: Value, host_derived: bool) -> Response {
+    let mut response = Json(body).into_response();
+    if host_derived {
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(header::VARY, HeaderValue::from_static("Host"));
+    }
+    response
 }
 
 fn client_metadata_document(origin: &str) -> Value {
@@ -56,7 +70,7 @@ pub async fn did_document(State(state): State<AppState>, req: Request) -> Respon
     let Some(origin) = state.public_url.clone().or_else(|| origin_from_host(&req)) else {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing or invalid Host header" }))).into_response();
     };
-    Json(json!({
+    let body = json!({
         "@context": ["https://www.w3.org/ns/did/v1"],
         "id": state.service_did,
         "service": [{
@@ -64,8 +78,8 @@ pub async fn did_document(State(state): State<AppState>, req: Request) -> Respon
             "type": "VoicebookService",
             "serviceEndpoint": origin.trim_end_matches('/'),
         }],
-    }))
-    .into_response()
+    });
+    document(body, state.public_url.is_none())
 }
 
 /// `https://<Host>`: the site is served over HTTPS by whatever terminates
@@ -109,6 +123,15 @@ mod tests {
         assert_eq!(doc["redirect_uris"][0], "https://voicebook.club/");
         assert_eq!(doc["token_endpoint_auth_method"], "none");
         assert_eq!(doc["scope"], OAUTH_SCOPE);
+    }
+
+    #[test]
+    fn host_derived_documents_are_never_cached() {
+        let derived = document(json!({}), true);
+        assert_eq!(derived.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(derived.headers()[header::VARY], "Host");
+        let configured = document(json!({}), false);
+        assert!(configured.headers().get(header::CACHE_CONTROL).is_none());
     }
 
     #[test]

@@ -75,6 +75,9 @@ export type BackendSession = {
 /** The account isn't on the instance's allowlist (closed beta). */
 export class NotInvitedError extends Error {}
 
+/** The backend is turning sign-ins away for a minute (429); try again soon. */
+export class SignInBusyError extends Error {}
+
 export async function backendSession(): Promise<BackendSession> {
   const res = await fetch('/api/session')
   if (!res.ok) throw new BackendError('/api/session', res)
@@ -95,6 +98,7 @@ export async function signInToBackend(agent: Agent): Promise<BackendSession> {
   })
   const res = await fetch('/api/session', { method: 'POST', headers: { authorization: `Bearer ${data.token}` } })
   if (res.status === 403) throw new NotInvitedError()
+  if (res.status === 429) throw new SignInBusyError()
   if (!res.ok) throw new BackendError('/api/session', res)
   return res.json() as Promise<BackendSession>
 }

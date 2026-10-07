@@ -4,7 +4,7 @@ Who is signed in to the backend (if anyone), and what a service-auth token
 must name to sign in. The frontend calls it after the OAuth sign-in to decide
 whether it needs to create a session.
 
-- **Auth:** none. If a `vb_session` cookie is sent, it's looked up.
+- **Auth:** none. If a session cookie is sent, it's looked up.
 - **Implemented in:** `get_session` in `backend/src/api.rs`.
 
 ## Response
@@ -43,7 +43,7 @@ sequenceDiagram
     participant B as Browser
     participant A as Backend
     participant D as SQLite
-    B->>A: GET /api/session (Cookie: vb_session=… if any)
+    B->>A: GET /api/session (Cookie: __Host-vb_session=… if any)
     opt cookie present
         A->>D: SELECT did FROM sessions WHERE token_hash = sha256(token) AND not expired
         D-->>A: did or none

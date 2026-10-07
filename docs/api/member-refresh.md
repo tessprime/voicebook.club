@@ -17,7 +17,7 @@ save, so a new member or a new recording shows up immediately.
 
 ```http
 POST /api/members/did%3Aplc%3Awzraxbnzzz4fxt72jhvuswbb/refresh
-Cookie: vb_session=…
+Cookie: __Host-vb_session=…
 x-voicebook-csrf: 1
 ```
 

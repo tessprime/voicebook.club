@@ -10,7 +10,7 @@ view and the Practice view's day list.
 
 ```http
 GET /api/users/did%3Aplc%3Awzraxbnzzz4fxt72jhvuswbb/recordings?limit=50&before=2026-10-05T00:00:00Z
-Cookie: vb_session=…
+Cookie: __Host-vb_session=…
 ```
 
 | Query | Default | |

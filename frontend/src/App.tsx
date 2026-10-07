@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 
-import { NotInvitedError, backendSession, refreshMember, setReauthenticate, signInToBackend, signOutOfBackend } from './api'
+import { NotInvitedError, SignInBusyError, backendSession, refreshMember, setReauthenticate, signInToBackend, signOutOfBackend } from './api'
 import { initSession, signIn, signOut, type Session } from './auth'
 import { Friends } from './views/Friends'
 import { Practice } from './views/Practice'
@@ -35,6 +35,10 @@ export default function App() {
           if (current.did !== session.did) await signInToBackend(session.agent)
         } catch (err) {
           if (err instanceof NotInvitedError) return setAuth({ kind: 'not-invited', session, handle })
+          // Keep the OAuth session: reloading in a minute just works.
+          if (err instanceof SignInBusyError) {
+            return setAuth({ kind: 'signed-out', error: 'Lots of sign-ins right now. Please reload in a minute.' })
+          }
           // Typically an OAuth session from before the backend sign-in scope
           // existed: signing in again grants it.
           await signOut(session).catch(() => undefined)

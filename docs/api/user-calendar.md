@@ -11,7 +11,7 @@ Practice view's calendar.
 
 ```http
 GET /api/users/did%3Aplc%3A3qrhneybizwlxs5ar3updfjq/calendar?month=2026-10&tzOffsetMinutes=-420
-Cookie: vb_session=…
+Cookie: __Host-vb_session=…
 ```
 
 | Query | | |

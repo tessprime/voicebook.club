@@ -22,12 +22,22 @@ use crate::atproto;
 pub const SESSION_LXM: &str = "club.voicebook.auth.createSession";
 /// The service ID within our DID document (`<serviceDid>#voicebook`).
 pub const SERVICE_ID: &str = "voicebook";
-pub const SESSION_COOKIE: &str = "vb_session";
+/// The session cookie over HTTPS. Browsers accept a `__Host-` cookie only
+/// from the same host, with `Secure`, `Path=/` and no `Domain`, so no other
+/// subdomain can plant one (session fixation by "cookie tossing").
+pub const SESSION_COOKIE: &str = "__Host-vb_session";
+/// The session cookie on plain-HTTP loopback (local development), where
+/// `__Host-` cookies can't be set because they require `Secure`.
+pub const SESSION_COOKIE_LOOPBACK: &str = "vb_session";
 pub const SESSION_DAYS: i64 = 30;
 /// Tolerated clock difference between us and the user's PDS.
 const CLOCK_SKEW_SECS: i64 = 60;
 /// The PDS issues method-bound tokens for at most an hour.
 const MAX_TOKEN_LIFETIME_SECS: i64 = 3600;
+/// DID resolutions during sign-in, across all callers, per minute. Each one
+/// is an outbound request (for `did:web`, to a host the token names); real
+/// sign-ins happen once per user per 30 days.
+pub const SIGN_IN_RESOLUTIONS_PER_MINUTE: u32 = 60;
 
 /// Verifies service-auth tokens addressed to this service.
 pub struct ServiceAuth {
@@ -35,11 +45,18 @@ pub struct ServiceAuth {
     client: atproto::Client,
     /// Token IDs already used, until they expire: a token creates one session.
     used: Mutex<HashMap<String, i64>>,
+    /// Resolutions in the current minute: (window start, count).
+    resolutions: Mutex<(i64, u32)>,
 }
 
 impl ServiceAuth {
     pub fn new(service_did: &str, client: atproto::Client) -> Self {
-        Self { audience: format!("{service_did}#{SERVICE_ID}"), client, used: Mutex::new(HashMap::new()) }
+        Self {
+            audience: format!("{service_did}#{SERVICE_ID}"),
+            client,
+            used: Mutex::new(HashMap::new()),
+            resolutions: Mutex::new((0, 0)),
+        }
     }
 
     /// What tokens must name as `aud`.
@@ -60,6 +77,9 @@ impl ServiceAuth {
         if !admits(&token.claims.iss) {
             return Ok(Verdict::NotAdmitted { unverified_did: token.claims.iss });
         }
+        if !self.take_resolution(now) {
+            return Ok(Verdict::Busy);
+        }
         // Resolution goes through the SSRF-guarded client.
         let identity = self.client.resolve(&token.claims.iss).await?;
         let key = PublicKey::from_multikey(identity.signing_key.as_deref().context("DID document has no #atproto key")?)?;
@@ -67,6 +87,19 @@ impl ServiceAuth {
         // Only after the signature checks out, so forged tokens can't burn IDs.
         self.consume(&token.claims, now)?;
         Ok(Verdict::Verified(token.claims.iss))
+    }
+
+    /// Takes one DID resolution from this minute's budget, if any is left.
+    fn take_resolution(&self, now: i64) -> bool {
+        let mut window = self.resolutions.lock().expect("resolution budget lock");
+        if now - window.0 >= 60 {
+            *window = (now, 0);
+        }
+        if window.1 >= SIGN_IN_RESOLUTIONS_PER_MINUTE {
+            return false;
+        }
+        window.1 += 1;
+        true
     }
 
     fn consume(&self, claims: &Claims, now: i64) -> Result<()> {
@@ -85,6 +118,9 @@ pub enum Verdict {
     /// The token names a DID that isn't admitted; nothing was fetched and
     /// the signature wasn't checked, so the DID is only a claim.
     NotAdmitted { unverified_did: String },
+    /// This minute's budget of sign-in resolutions is spent; nothing was
+    /// fetched. Try again shortly.
+    Busy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,5 +406,18 @@ mod tests {
         // Bad claims are still rejected first, admitted or not.
         let wrong_aud = k256_token("ES256K", &claims(serde_json::json!({ "aud": "did:web:other#voicebook", "exp": now + 60 })));
         assert!(auth.verify(&wrong_aud, |_| false).await.is_err());
+    }
+
+    #[test]
+    fn sign_in_resolutions_are_budgeted_per_minute() {
+        let auth = ServiceAuth::new(
+            "did:web:voicebook.club",
+            atproto::Client::new("http://127.0.0.1:1", crate::fetch_guard::FetchPolicy { allow_private: true }).unwrap(),
+        );
+        for _ in 0..SIGN_IN_RESOLUTIONS_PER_MINUTE {
+            assert!(auth.take_resolution(NOW));
+        }
+        assert!(!auth.take_resolution(NOW + 30), "spent for this minute");
+        assert!(auth.take_resolution(NOW + 60), "a new minute");
     }
 }

@@ -29,8 +29,11 @@ which return 404.
 
 ## Conventions
 
-**Authentication.** Protected endpoints need the `vb_session` cookie, which
-`POST /api/session` sets. Before the handler runs, every protected request
+**Authentication.** Protected endpoints need the session cookie, which
+`POST /api/session` sets: `__Host-vb_session` over HTTPS, `vb_session` on
+plain-HTTP loopback in local development (where `__Host-` cookies can't be
+set). Over HTTPS the server reads only the `__Host-` name, which no other
+subdomain can set. Before the handler runs, every protected request
 goes through the same check (shown as *session check* in the diagrams):
 
 ```mermaid
@@ -38,7 +41,7 @@ sequenceDiagram
     participant B as Browser
     participant A as Backend
     participant D as SQLite
-    B->>A: request + Cookie: vb_session=…
+    B->>A: request + Cookie: __Host-vb_session=…
     alt changes something (not GET/HEAD) and no x-voicebook-csrf header
         A-->>B: 403 {"error":"missing CSRF header"}
     end

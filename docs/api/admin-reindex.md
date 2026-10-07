@@ -17,7 +17,7 @@ instances (see `docs/mvp-local.md` §19).
 
 ```http
 POST /api/admin/reindex
-Cookie: vb_session=…
+Cookie: __Host-vb_session=…
 x-voicebook-csrf: 1
 ```
 

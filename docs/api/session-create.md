@@ -33,7 +33,7 @@ Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NksifQ.eyJpYXQiOjE3OTEzMzM
 `200 OK`, with the cookie:
 
 ```http
-Set-Cookie: vb_session=…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; Secure
+Set-Cookie: __Host-vb_session=…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; Secure
 ```
 
 ```json
@@ -46,7 +46,8 @@ Set-Cookie: vb_session=…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; 
 ```
 
 - The session lasts 30 days. Only a SHA-256 hash of its token is stored.
-- `Secure` is omitted on plain-HTTP loopback hosts (local development).
+- On plain-HTTP loopback hosts (local development) the cookie is
+  `vb_session`, without `Secure`; `__Host-` cookies require it.
 
 ## Errors
 
@@ -54,6 +55,7 @@ Set-Cookie: vb_session=…; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; 
 |---|---|---|
 | 401 | `not_signed_in` | No bearer token, or the token fails any check below. The reason is logged (`service-auth token rejected`), not returned. |
 | 403 | `not_invited` | The token's `iss` isn't on the allowlist. Checked before the signature, so nothing is fetched for uninvited accounts; the log line `sign-in attempt for an account not on the allowlist` records the DID as unverified. |
+| 429 | `too_many_sign_ins` | This minute's budget of 60 sign-in DID resolutions (all callers) is spent; `Retry-After: 60`. Nothing was fetched. |
 | 500 | `internal error` | The session couldn't be stored |
 
 The token must: name exactly our audience and method; not be expired, issued
@@ -79,6 +81,9 @@ sequenceDiagram
     alt iss not on the allowlist (unverified)
         A-->>B: 403 not_invited, nothing fetched
     end
+    alt sign-in resolution budget spent this minute
+        A-->>B: 429 too_many_sign_ins, Retry-After 60
+    end
     A->>L: GET /{iss} (SSRF-guarded)
     L-->>A: DID document
     A->>A: #atproto key → verify signature (ES256K/ES256, low-S)
@@ -87,5 +92,5 @@ sequenceDiagram
         A-->>B: 401 not_signed_in
     end
     A->>D: INSERT INTO sessions (sha256(token), did, expires in 30 days)
-    A-->>B: 200 {did, admin, …} + Set-Cookie: vb_session
+    A-->>B: 200 {did, admin, …} + Set-Cookie: __Host-vb_session
 ```

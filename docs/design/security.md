@@ -21,8 +21,8 @@ hosting, secrets).
 | 3 | **Software supply chain failures** | Vulnerable or compromised dependencies, build pipeline | ✅ Dependabot (`.github/dependabot.yml`) opens weekly update PRs for Cargo, npm, Dockerfile and Compose images; `scripts/audit.sh` runs `cargo audit` and `npm audit` (and Trivy on the image with `--image`) locally. Ignored advisories are listed with reasons in `backend/.cargo/audit.toml`. Lockfiles are committed; images are pinned; builds use `npm ci` and `cargo build --locked`. ⚠️ Container images aren't scanned unless Trivy is installed; nothing runs the audit automatically (no CI). |
 | 4 | **Cryptographic failures** | Weak or missing encryption, mishandled secrets | ✅ TLS is terminated in front of the container; outbound TLS uses rustls; session tokens are stored only as SHA-256 hashes; service-auth signatures must be low-S on both curves. No secrets exist yet; the convention for them is in `deploy/README.md`. |
 | 5 | **Injection** | SQL, HTML/script (XSS), commands, logs | ✅ All SQL values are bound parameters (`sqlx` `bind`/`push_bind`). React escapes rendered text (notes included) and nothing uses raw-HTML rendering. Logs are JSON-encoded, so values can't forge log lines. No shell commands run on user input. |
-| 6 | **Insecure design** | Missing safeguards in the design itself | ⚠️ **No rate limiting** on `POST /api/session` or refresh. Low urgency while only invited accounts can create sessions. |
-| 7 | **Authentication failures** | Weak login, session handling | ✅ Service-auth tokens are single-use and fully verified; tokens naming uninvited accounts are refused before any network request (so unauthenticated callers can't make the server fetch arbitrary DIDs), at the accepted cost of making allowlist membership observable; each sign-in creates a fresh session; cookies are `HttpOnly`, `SameSite=Strict` and `Secure`; sign-out deletes the session. ⚠️ No way to list or revoke your other sessions; sessions last 30 days. |
+| 6 | **Insecure design** | Missing safeguards in the design itself | ✅ Sign-in DID resolutions are budgeted globally (60/minute, then 429). ⚠️ No per-client rate limiting on `POST /api/session` or refresh. Low urgency while only invited accounts can create sessions. |
+| 7 | **Authentication failures** | Weak login, session handling | ✅ Service-auth tokens are single-use and fully verified; tokens naming uninvited accounts are refused before any network request (so unauthenticated callers can't make the server fetch arbitrary DIDs), at the accepted cost of making allowlist membership observable; each sign-in creates a fresh session; cookies are `__Host-`prefixed (no subdomain can plant one), `HttpOnly`, `SameSite=Strict` and `Secure`; sign-out deletes the session. ⚠️ No way to list or revoke your other sessions; sessions last 30 days. |
 | 8 | **Software or data integrity failures** | Unverified updates, unsafe data handling | ✅ Untrusted JSON (records, DID documents, Jetstream events) is parsed into strict types; malformed records are skipped. ⚠️ No CI pipeline or image signing yet. |
 | 9 | **Logging and alerting failures** | Attacks happen unnoticed | ✅ Rejected service-auth tokens and sign-ins by uninvited accounts are logged; nginx keeps client IPs. ⚠️ **Nothing alerts** until a telemetry server exists (`logging.md`, Production). |
 | 10 | **Mishandling exceptional conditions** | Failing open, leaking details in errors | ✅ Errors return a generic 500, with details only in logs. Access checks fail closed on the backend; the frontend's fallbacks only change which screen is shown. |
@@ -135,6 +135,14 @@ The session cookie's attributes (`Set-Cookie`) are documented in
 `SameSite=Strict` (not sent on requests from other sites: CSRF), `Secure` (only
 over HTTPS).
 
+## Reviews
+
+Security reviews are recorded in [`../sec_revs/`](../sec_revs/), one file per
+review: scope, findings, and how each was resolved.
+
+- [2026-10-06: authentication, API authorization, fetch guard](../sec_revs/2026-10-06-auth-and-fetch-guard.md):
+  no high or medium findings; five low, all fixed.
+
 ## Open items
 
 In priority order:
@@ -145,8 +153,9 @@ In priority order:
 2. **Dependency scanning**: done (Dependabot, `scripts/audit.sh`). Enable
    "Dependabot security updates" in the GitHub repository settings, and run
    `scripts/audit.sh` before each release.
-3. **A security review of the authentication code** before it's deployed
-   (`/security-review` on the pending changes, or a second person).
+3. **A security review of the authentication code**: done
+   ([2026-10-06](../sec_revs/2026-10-06-auth-and-fetch-guard.md)). A second,
+   human reviewer before opening beyond invites is still worthwhile.
 
 **Before opening beyond invites**
 
