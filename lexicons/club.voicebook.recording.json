@@ -38,12 +38,54 @@
             "maxGraphemes": 3000,
             "description": "Freeform notes about the practice session."
           },
+          "transcript": {
+            "type": "ref",
+            "ref": "#transcript",
+            "description": "What was read, as text: transcribed by a speech-to-text service the reader chose, and possibly edited by them."
+          },
           "audio": {
             "type": "blob",
             "accept": ["audio/*"],
             "maxSize": 100000000
           }
         }
+      }
+    },
+    "transcript": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 200000,
+          "maxGraphemes": 100000,
+          "description": "The transcript."
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 640,
+          "maxGraphemes": 64,
+          "description": "The speech-to-text model that produced it, if known (e.g. whisper-1)."
+        },
+        "edited": {
+          "type": "boolean",
+          "description": "Whether the reader changed the text after it was transcribed."
+        },
+        "words": {
+          "type": "array",
+          "maxLength": 50000,
+          "items": { "type": "ref", "ref": "#timedWord" },
+          "description": "When each word was spoken, as transcribed (before any edits to text)."
+        }
+      }
+    },
+    "timedWord": {
+      "type": "object",
+      "required": ["text", "startMs", "endMs"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 640, "maxGraphemes": 64 },
+        "startMs": { "type": "integer", "minimum": 0 },
+        "endMs": { "type": "integer", "minimum": 0 }
       }
     }
   }

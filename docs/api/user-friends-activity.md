@@ -17,7 +17,7 @@ GET /api/users/did%3Aplc%3Awzraxbnzzz4fxt72jhvuswbb/friends/activity?limit=50
 Cookie: __Host-vb_session=…
 ```
 
-`limit` and `before` page as described in [Paging](README.md#paging).
+`limit`, `before` and `since` page as described in [Paging](README.md#paging).
 
 ## Response
 

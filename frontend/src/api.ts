@@ -4,6 +4,8 @@
 
 import type { Agent } from '@atproto/api'
 
+import type { TimedWord } from './transcription'
+
 export type Recording = {
   uri: string
   did: string
@@ -13,6 +15,7 @@ export type Recording = {
   chapter: string | null
   durationMs: number | null
   notes: string | null
+  transcript: string | null
   mimeType: string | null
   sizeBytes: number | null
   audioUrl: string | null
@@ -22,6 +25,13 @@ export type PracticeDay = {
   date: string // YYYY-MM-DD in the viewer's time zone
   recordingCount: number
   durationMs: number | null
+}
+
+/** A followed member's practice days in one month (empty if they didn't practice). */
+export type FriendCalendar = {
+  did: string
+  handle: string | null
+  days: PracticeDay[]
 }
 
 /**
@@ -107,6 +117,15 @@ export async function signOutOfBackend(): Promise<void> {
   await fetch('/api/session', { method: 'DELETE', headers: CSRF_HEADERS })
 }
 
+/** A recording with its transcript's word timings (null without them). */
+export type RecordingDetail = Recording & { transcriptWords: TimedWord[] | null }
+
+export function recordingDetail(uri: string): Promise<RecordingDetail> {
+  // at://did/collection/rkey
+  const [, , did, , rkey] = uri.split('/')
+  return get(`/api/users/${encodeURIComponent(did)}/recordings/${encodeURIComponent(rkey)}`)
+}
+
 export function recordings(did: string, limit = 100): Promise<Recording[]> {
   return get(`/api/users/${encodeURIComponent(did)}/recordings?limit=${limit}`)
 }
@@ -117,8 +136,20 @@ export function calendar(did: string, month: string): Promise<PracticeDay[]> {
   return get(`/api/users/${encodeURIComponent(did)}/calendar?month=${month}&tzOffsetMinutes=${tzOffsetMinutes}`)
 }
 
-export function friendsActivity(did: string, limit = 50): Promise<Recording[]> {
-  return get(`/api/users/${encodeURIComponent(did)}/friends/activity?limit=${limit}`)
+export function friendsCalendar(did: string, month: string): Promise<FriendCalendar[]> {
+  const tzOffsetMinutes = -new Date().getTimezoneOffset()
+  return get(`/api/users/${encodeURIComponent(did)}/friends/calendar?month=${month}&tzOffsetMinutes=${tzOffsetMinutes}`)
+}
+
+/** Friends' recordings, newest first; `since`/`before` (Dates) bound the range. */
+export function friendsActivity(
+  did: string,
+  { limit = 50, since, before }: { limit?: number; since?: Date; before?: Date } = {},
+): Promise<Recording[]> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (since) query.set('since', since.toISOString())
+  if (before) query.set('before', before.toISOString())
+  return get(`/api/users/${encodeURIComponent(did)}/friends/activity?${query}`)
 }
 
 /**
@@ -138,6 +169,7 @@ export type NewRecording = {
   chapter?: string
   notes?: string
   durationMs?: number
+  transcript?: { text: string; model?: string; edited?: boolean; words?: TimedWord[] }
   file: Blob
 }
 
@@ -155,6 +187,7 @@ export async function createRecording(agent: Agent, did: string, input: NewRecor
     ...(input.chapter ? { chapter: input.chapter } : {}),
     ...(input.notes ? { notes: input.notes } : {}),
     ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+    ...(input.transcript?.text ? { transcript: input.transcript } : {}),
     // Use the PDS's blob reference unchanged; it may have normalized the MIME type.
     audio: upload.data.blob,
   }
@@ -164,6 +197,39 @@ export async function createRecording(agent: Agent, did: string, input: NewRecor
     record,
   })
   return created.data.uri
+}
+
+export type RecordTranscript = NonNullable<NewRecording['transcript']>
+
+/**
+ * Sets (or replaces) the transcript on one of the user's own recordings, then
+ * waits until the backend has indexed the change. The update is conditional
+ * on the record being unchanged since it was read (swapRecord), so a
+ * concurrent edit isn't overwritten. Throws only if the record wasn't
+ * updated; returns null if it was but the backend couldn't be asked about it.
+ */
+export async function setTranscript(agent: Agent, uri: string, transcript: RecordTranscript): Promise<RecordingDetail | null> {
+  const [, , did, collection, rkey] = uri.split('/')
+  const current = await agent.com.atproto.repo.getRecord({ repo: did, collection, rkey })
+  await agent.com.atproto.repo.putRecord({
+    repo: did,
+    collection,
+    rkey,
+    record: { ...current.data.value, transcript },
+    swapRecord: current.data.cid,
+  })
+  // Saved. From here on, failures only delay when the change shows.
+  try {
+    await refreshMember(did).catch(() => undefined)
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const detail = await recordingDetail(uri)
+      if (detail.transcript === transcript.text || Date.now() > deadline) return detail
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+  } catch {
+    return null
+  }
 }
 
 /** Polls the backend until `uri` is indexed, so the UI can show it. */

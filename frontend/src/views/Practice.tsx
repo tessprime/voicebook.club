@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { calendar, recordings, type PracticeDay, type Recording } from '../api'
+import { calendar, friendsActivity, friendsCalendar, recordings, type FriendCalendar, type PracticeDay, type Recording } from '../api'
 import type { Session } from '../auth'
+import { FriendPicker } from '../components/FriendPicker'
 import { PracticeForm } from '../components/PracticeForm'
 import { RecordingItem } from '../components/RecordingItem'
 import { deleteDraft, listDrafts, updateDraft, type Draft } from '../drafts'
+import { friendColorClass, friendName, loadHiddenFriends, saveHiddenFriends } from '../friends'
 import { addDays, addMonths, formatClock, formatDateTime, formatDuration, localDate, monthKey } from '../format'
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+/** Friend dots per day before the rest are summarized as "+n". */
+const MAX_FRIEND_DOTS = 3
 
 export function Practice({ session, dataVersion }: { session: Session; dataVersion: number }) {
   const [today] = useState(() => localDate(new Date()))
@@ -20,6 +24,8 @@ export function Practice({ session, dataVersion }: { session: Session; dataVersi
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [version, setVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [friends, setFriends] = useState<FriendCalendar[]>([])
+  const [hidden, setHidden] = useState(() => loadHiddenFriends(session.did))
 
   useEffect(() => {
     let stale = false
@@ -35,6 +41,38 @@ export function Practice({ session, dataVersion }: { session: Session; dataVersi
       stale = true
     }
   }, [session.did, month, version, dataVersion])
+
+  // Loaded separately: friends failing to load shouldn't hide your own calendar.
+  useEffect(() => {
+    let stale = false
+    friendsCalendar(session.did, monthKey(month)).then(
+      (friends) => !stale && setFriends(friends),
+      () => !stale && setFriends([]),
+    )
+    return () => {
+      stale = true
+    }
+  }, [session.did, month, dataVersion])
+
+  // The selected day's recordings by friends, for listing under each friend.
+  const [friendRecordings, setFriendRecordings] = useState<{ date: string; recordings: Recording[] } | null>(null)
+  useEffect(() => {
+    if (!selected) return
+    let stale = false
+    const since = new Date(`${selected}T00:00`)
+    friendsActivity(session.did, { since, before: addDays(since, 1), limit: 200 }).then(
+      (recordings) => !stale && setFriendRecordings({ date: selected, recordings }),
+      () => undefined,
+    )
+    return () => {
+      stale = true
+    }
+  }, [session.did, selected, dataVersion])
+
+  function changeHidden(next: Set<string>) {
+    setHidden(next)
+    saveHiddenFriends(session.did, next)
+  }
 
   // Unsaved recordings, re-checked whenever the form closes.
   useEffect(() => {
@@ -56,6 +94,20 @@ export function Practice({ session, dataVersion }: { session: Session; dataVersi
 
   const practiceDays = useMemo(() => new Map(days.map((d) => [d.date, d])), [days])
   const streak = useMemo(() => currentStreak(recent), [recent])
+  // Shown friends who practiced each day, in list order (which sets their color).
+  const friendDays = useMemo(() => {
+    const byDate = new Map<string, { friend: FriendCalendar; index: number; day: PracticeDay }[]>()
+    friends.forEach((friend, index) => {
+      if (hidden.has(friend.did)) return
+      for (const day of friend.days) {
+        const list = byDate.get(day.date) ?? []
+        list.push({ friend, index, day })
+        byDate.set(day.date, list)
+      }
+    })
+    return byDate
+  }, [friends, hidden])
+  const selectedFriendRecordings = friendRecordings?.date === selected ? friendRecordings.recordings : []
   const selectedRecordings = selected ? recent.filter((r) => localDate(new Date(r.createdAt)) === selected) : []
 
   return (
@@ -80,20 +132,37 @@ export function Practice({ session, dataVersion }: { session: Session; dataVersi
           if (!date) return <div key={`pad-${i}`} />
           const key = localDate(date)
           const day = practiceDays.get(key)
+          const others = friendDays.get(key) ?? []
           const classes = ['day', day && 'practiced', key === today && 'today', key === selected && 'selected']
           return (
             <button
               key={key}
               className={classes.filter(Boolean).join(' ')}
               onClick={() => setSelected(key === selected ? null : key)}
-              aria-label={`${date.toLocaleDateString()}${day ? `, ${day.recordingCount} recording(s)` : ''}`}
+              aria-label={[
+                date.toLocaleDateString(),
+                day && `${day.recordingCount} recording(s)`,
+                others.length && `practiced: ${others.map((o) => friendName(o.friend)).join(', ')}`,
+              ]
+                .filter(Boolean)
+                .join(', ')}
             >
               <span>{date.getDate()}</span>
-              {day && <span className="dot" aria-hidden />}
+              {(day || others.length > 0) && (
+                <span className="dots" aria-hidden>
+                  {day && <span className="dot" />}
+                  {others.slice(0, MAX_FRIEND_DOTS).map((o) => (
+                    <span key={o.friend.did} className={`dot ${friendColorClass(o.index)}`} />
+                  ))}
+                  {others.length > MAX_FRIEND_DOTS && <span className="more">+{others.length - MAX_FRIEND_DOTS}</span>}
+                </span>
+              )}
             </button>
           )
         })}
       </div>
+
+      {friends.length > 0 && <FriendPicker friends={friends} hidden={hidden} onChange={changeHidden} />}
 
       <p className="stats">
         <strong>{days.length}</strong> practice {days.length === 1 ? 'day' : 'days'} this month
@@ -148,12 +217,30 @@ export function Practice({ session, dataVersion }: { session: Session; dataVersi
           {selectedRecordings.length ? (
             <ul className="recordings">
               {selectedRecordings.map((r) => (
-                <RecordingItem key={r.uri} recording={r} />
+                <RecordingItem key={r.uri} recording={r} dot="" />
               ))}
             </ul>
           ) : (
-            <p className="muted">No practice this day.</p>
+            <p className="muted">{friendDays.has(selected) ? 'You didn’t practice this day.' : 'No practice this day.'}</p>
           )}
+          {friendDays.get(selected)?.map(({ friend, index, day }) => (
+            <div key={friend.did} className="friend-day">
+              <h4>
+                <span className={`dot ${friendColorClass(index)}`} aria-hidden />
+                {friendName(friend)}
+                <span className="muted">
+                  {day.durationMs ? formatDuration(day.durationMs) : `${day.recordingCount} recording(s)`}
+                </span>
+              </h4>
+              <ul className="recordings">
+                {selectedFriendRecordings
+                  .filter((r) => r.did === friend.did)
+                  .map((r) => (
+                    <RecordingItem key={r.uri} recording={r} dot={friendColorClass(index)} />
+                  ))}
+              </ul>
+            </div>
+          ))}
         </div>
       )}
     </section>

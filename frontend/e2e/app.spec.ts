@@ -96,9 +96,9 @@ test('sign in, record, play back, and see friends', async ({ page }) => {
   await expect(item).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.day.today')).toHaveClass(/practiced/)
 
-  // Playback from the PDS, with a known duration (seekable).
+  // Play opens the details panel, which plays from the PDS, with a known duration (seekable).
   await item.getByRole('button', { name: /Play/ }).click()
-  const audio = item.locator('audio')
+  const audio = page.getByRole('complementary', { name: 'Recording details' }).locator('audio')
   await expect(audio).toBeVisible()
   const duration = await audio.evaluate(
     (el: HTMLAudioElement) =>
@@ -119,6 +119,141 @@ test('sign in, record, play back, and see friends', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByLabel('Your Bluesky handle')).toBeVisible()
+})
+
+test("friends' practice shows on the calendar, and friends can be hidden", async ({ page }) => {
+  await signIn(page, 'alice.test')
+
+  // Go to the month of bob's latest recording (its date in the browser's time zone).
+  const [latest] = await (await page.request.get(`/api/users/${encodeURIComponent(accounts.bob.did)}/recordings?limit=1`)).json()
+  const practiced = new Date(latest.createdAt)
+  const now = new Date()
+  const monthsBack = (now.getFullYear() - practiced.getFullYear()) * 12 + now.getMonth() - practiced.getMonth()
+  for (let i = 0; i < monthsBack; i++) await page.getByRole('button', { name: 'Previous month' }).click()
+
+  // Followed members are listed, whether or not they practiced this month.
+  const picker = page.getByRole('group', { name: 'Friends shown on the calendar' })
+  const bob = picker.getByRole('button', { name: '@bob.test' })
+  await expect(bob).toHaveAttribute('aria-pressed', 'true')
+  await expect(picker.getByRole('button', { name: '@carol.test' })).toBeVisible()
+
+  const day = page.locator('.day', { has: page.locator('span', { hasText: new RegExp(`^${practiced.getDate()}$`) }) })
+  await expect(day).toHaveAttribute('aria-label', /practiced: .*@bob\.test/)
+  await day.click()
+  // The day lists what bob recorded that day.
+  const bobsDay = page.locator('.friend-day', { hasText: '@bob.test' })
+  await expect(bobsDay.locator('.recording').first()).toContainText(latest.work)
+  await expect(bobsDay.getByRole('button', { name: /Play/ }).first()).toBeVisible()
+
+  // Hidden friends stay hidden after a reload (remembered in this browser).
+  await bob.click()
+  await expect(bob).toHaveAttribute('aria-pressed', 'false')
+  await expect(day).not.toHaveAttribute('aria-label', /@bob\.test/)
+  await page.reload()
+  for (let i = 0; i < monthsBack; i++) await page.getByRole('button', { name: 'Previous month' }).click()
+  await expect(bob).toHaveAttribute('aria-pressed', 'false')
+  await bob.click()
+  await expect(day).toHaveAttribute('aria-label', /@bob\.test/)
+})
+
+test('a transcription service set up in Settings fills in the transcript, which is saved with the recording', async ({ page }) => {
+  // A stand-in OpenAI-style service, answered inside the browser (with CORS, as a real one must).
+  const STT = 'https://stt.example.test/v1/audio/transcriptions'
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization' }
+  const seen: { authorization?: string; multipart: boolean }[] = []
+  await page.route(STT, async (route) => {
+    const request = route.request()
+    if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors })
+    // (Playwright doesn't expose multipart bodies holding files, so the upload itself isn't inspected.)
+    const contentType = (await request.headerValue('content-type')) ?? ''
+    seen.push({ authorization: (await request.headerValue('authorization')) ?? undefined, multipart: contentType.startsWith('multipart/form-data') })
+    // verbose_json with word timings, in seconds.
+    const words = ['It', 'is', 'a', 'truth', 'universally', 'acknowledged.'].map((word, i) => ({ word, start: i * 0.3, end: i * 0.3 + 0.25 }))
+    return route.fulfill({ headers: cors, json: { text: ' It is a truth universally acknowledged. ', words } })
+  })
+
+  await signIn(page, 'alice.test')
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('button', { name: 'Add a transcription service' }).click()
+  await page.getByLabel('Name').fill('Test STT')
+  await page.getByLabel('Transcription URL').fill(STT)
+  await page.getByLabel('Model').fill('whisper-test')
+  await page.getByLabel(/API key/).fill('sk-test-secret')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page.locator('.endpoint')).toContainText('API key set')
+  await expect(page.locator('.endpoint')).not.toContainText('sk-test-secret')
+
+  const chapter = `e2e-transcript-${Date.now()}`
+  await page.getByRole('button', { name: 'Practice' }).click()
+  await page.getByRole('button', { name: 'Start Practice' }).click()
+  await page.getByLabel('Book or work').fill('Pride and Prejudice')
+  await page.getByLabel(/Chapter or passage/).fill(chapter)
+  await page.getByRole('tab', { name: 'Upload a file' }).click()
+  await page.getByLabel('Audio file').setInputFiles(testTone(2))
+  await page.getByRole('button', { name: 'Transcribe' }).click()
+  const transcript = page.getByLabel(/^Transcript/)
+  await expect(transcript).toHaveValue('It is a truth universally acknowledged.')
+  expect(seen).toEqual([{ authorization: 'Bearer sk-test-secret', multipart: true }])
+
+  // Edited before saving; the text is what's stored.
+  await transcript.fill('It is a truth universally acknowledged, that a single man…')
+  await page.getByRole('button', { name: 'Save recording' }).click()
+  const item = page.locator('.recording', { hasText: `Chapter ${chapter}` })
+  await expect(item).toBeVisible({ timeout: 15_000 })
+  await item.getByText('Transcript', { exact: true }).click()
+  await expect(item.locator('.transcript p')).toHaveText('It is a truth universally acknowledged, that a single man…')
+
+  // In the public record: the text, which model produced it, and that it was edited.
+  const recent: { uri: string; chapter: string }[] = await (
+    await page.request.get(`/api/users/${encodeURIComponent(accounts.alice.did)}/recordings?limit=10`)
+  ).json()
+  const [, , did, collection, rkey] = recent.find((r) => r.chapter === chapter)!.uri.split('/')
+  const stored = await (
+    await page.request.get(`http://localhost:2583/xrpc/com.atproto.repo.getRecord?repo=${did}&collection=${collection}&rkey=${rkey}`)
+  ).json()
+  expect(stored.value.transcript).toEqual({
+    text: 'It is a truth universally acknowledged, that a single man…',
+    model: 'whisper-test',
+    edited: true,
+    words: [
+      { text: 'It', startMs: 0, endMs: 250 },
+      { text: 'is', startMs: 300, endMs: 550 },
+      { text: 'a', startMs: 600, endMs: 850 },
+      { text: 'truth', startMs: 900, endMs: 1150 },
+      { text: 'universally', startMs: 1200, endMs: 1450 },
+      { text: 'acknowledged.', startMs: 1500, endMs: 1750 },
+    ],
+  })
+
+  // Clicking the recording opens its details: the spectrogram, the audio, and the timed words.
+  await item.getByRole('button', { name: /Pride and Prejudice/ }).click()
+  const details = page.getByRole('complementary', { name: 'Recording details' })
+  await expect(details.locator('voice-spectrogram')).toBeVisible()
+  await expect(details.locator('voice-spectrogram canvas')).toBeAttached()
+  const words = details.locator('.timed-transcript .word')
+  await expect(words).toHaveCount(6)
+  await expect(details.getByText('Edited transcript')).toBeVisible()
+
+  // Clicking a word seeks there and highlights it.
+  await words.filter({ hasText: 'truth' }).click()
+  const audio = details.locator('audio')
+  await expect.poll(() => audio.evaluate((el: HTMLAudioElement) => el.currentTime)).toBeCloseTo(0.9, 1)
+  await expect(words.filter({ hasText: 'truth' })).toHaveClass(/current/)
+
+  // Transcribing again from the details panel replaces the edited transcript in the record.
+  page.once('dialog', (dialog) => dialog.accept())
+  await details.getByRole('button', { name: 'Transcribe again' }).click()
+  await expect(details.getByText('Edited transcript')).toHaveCount(0)
+  expect(seen).toHaveLength(2)
+  const updated = await (
+    await page.request.get(`http://localhost:2583/xrpc/com.atproto.repo.getRecord?repo=${did}&collection=${collection}&rkey=${rkey}`)
+  ).json()
+  expect(updated.value.transcript.text).toBe('It is a truth universally acknowledged.')
+  expect(updated.value.transcript.edited).toBeUndefined()
+  expect(updated.value.work).toBe('Pride and Prejudice')
+
+  await details.getByRole('button', { name: 'Close details' }).click()
+  await expect(details).toHaveCount(0)
 })
 
 test('record in the browser; the draft survives a reload until saved', async ({ page }) => {
@@ -155,7 +290,7 @@ test('record in the browser; the draft survives a reload until saved', async ({ 
   const item = page.locator('.recording', { hasText: `Chapter ${chapter}` })
   await expect(item).toBeVisible({ timeout: 15_000 })
   await item.getByRole('button', { name: /Play/ }).click()
-  expect(await audioDuration(item.locator('audio'))).toBeGreaterThan(2.5)
+  expect(await audioDuration(page.getByRole('complementary', { name: 'Recording details' }).locator('audio'))).toBeGreaterThan(2.5)
 
   // Saved, so the browser copy is gone.
   await page.reload()

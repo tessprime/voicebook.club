@@ -4,6 +4,8 @@
 
 import fixWebmDuration from 'fix-webm-duration'
 
+import type { TimedWord } from './transcription'
+
 export type Draft = {
   id: string
   /** When recording started; becomes the record's createdAt. */
@@ -16,6 +18,16 @@ export type Draft = {
   work: string
   chapter: string
   notes: string
+  /** Kept with the audio once transcribed, so a reload doesn't lose (or re-pay for) it. */
+  transcript?: DraftTranscript
+}
+
+export type DraftTranscript = {
+  text: string
+  /** What the service returned, to tell whether the text was edited. */
+  transcribed: string
+  model: string | null
+  words?: TimedWord[] | null
 }
 
 type Chunk = { draftId: string; seq: number; blob: Blob }

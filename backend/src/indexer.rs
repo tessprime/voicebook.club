@@ -4,7 +4,7 @@
 //! Jetstream delivery is at-least-once and its cursor is inclusive.
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{SqlitePool, Sqlite, Transaction};
 use tracing::{Instrument, info, instrument, warn};
@@ -51,7 +51,34 @@ struct RecordingRecord {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    /// Read loosely: a malformed transcript drops the transcript, not the recording.
+    transcript: Option<serde_json::Value>,
     audio: BlobRef,
+}
+
+/// Most word timings kept for one recording (about 6 hours of speech).
+const MAX_TRANSCRIPT_WORDS: usize = 50_000;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TimedWord {
+    text: String,
+    start_ms: u64,
+    end_ms: u64,
+}
+
+impl RecordingRecord {
+    fn transcript_text(&self) -> Option<&str> {
+        self.transcript.as_ref()?.get("text")?.as_str()
+    }
+
+    /// The transcript's word timings as JSON, if all of them are well formed.
+    fn transcript_words(&self) -> Option<String> {
+        let words = self.transcript_text().and(self.transcript.as_ref()?.get("words"))?;
+        let words: Vec<TimedWord> = serde_json::from_value(words.clone()).ok()?;
+        let valid = !words.is_empty() && words.len() <= MAX_TRANSCRIPT_WORDS && words.iter().all(|w| w.start_ms <= w.end_ms);
+        valid.then(|| serde_json::to_string(&words).ok()).flatten()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,11 +510,12 @@ async fn upsert_recording(tx: &mut Transaction<'_, Sqlite>, did: &str, rkey: &st
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO recordings (uri, did, rkey, cid, created_at, work, chapter, duration_ms, notes, blob_cid, mime_type, size_bytes, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ'))
+        "INSERT INTO recordings (uri, did, rkey, cid, created_at, work, chapter, duration_ms, notes, transcript, transcript_words, blob_cid, mime_type, size_bytes, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ'))
          ON CONFLICT (uri) DO UPDATE SET
            cid = excluded.cid, created_at = excluded.created_at, work = excluded.work,
            chapter = excluded.chapter, duration_ms = excluded.duration_ms, notes = excluded.notes,
+           transcript = excluded.transcript, transcript_words = excluded.transcript_words,
            blob_cid = excluded.blob_cid, mime_type = excluded.mime_type,
            size_bytes = excluded.size_bytes, indexed_at = excluded.indexed_at",
     )
@@ -500,6 +528,8 @@ async fn upsert_recording(tx: &mut Transaction<'_, Sqlite>, did: &str, rkey: &st
     .bind(&record.chapter)
     .bind(record.duration_ms)
     .bind(&record.notes)
+    .bind(record.transcript_text())
+    .bind(record.transcript_words())
     .bind(&record.audio.link.cid)
     .bind(&record.audio.mime_type)
     .bind(record.audio.size)
@@ -594,6 +624,44 @@ mod tests {
         let created_at: String = sqlx::query_scalar("SELECT created_at FROM recordings").fetch_one(&ix.db).await.unwrap();
         assert_eq!(created_at, "2026-10-05T07:00:00.000Z", "normalized to UTC");
         assert_eq!(ix.cursor(CURSOR).await.unwrap(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn transcripts_are_indexed_and_a_malformed_one_is_dropped() {
+        let ix = indexer().await;
+        let mut with_transcript = recording(ALICE, 1, "r1", "2026-10-05T09:00:00Z");
+        let record = with_transcript.commit.as_mut().unwrap().record.as_mut().unwrap();
+        record["transcript"] = json!({
+            "text": "It is a truth universally acknowledged", "model": "whisper-1",
+            "words": [{"text": "It", "startMs": 0, "endMs": 180}, {"text": "is", "startMs": 180, "endMs": 300}]
+        });
+        ix.handle(&with_transcript, CURSOR).await.unwrap();
+
+        // Bad timings (end before start) drop the timings but keep the text.
+        let mut bad_words = recording(ALICE, 3, "r3", "2026-10-05T11:00:00Z");
+        bad_words.commit.as_mut().unwrap().record.as_mut().unwrap()["transcript"] =
+            json!({"text": "Hello", "words": [{"text": "Hello", "startMs": 500, "endMs": 100}]});
+        ix.handle(&bad_words, CURSOR).await.unwrap();
+
+        let mut malformed = recording(ALICE, 2, "r2", "2026-10-05T10:00:00Z");
+        malformed.commit.as_mut().unwrap().record.as_mut().unwrap()["transcript"] = json!({"text": 42});
+        ix.handle(&malformed, CURSOR).await.unwrap();
+
+        let transcripts: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT rkey, transcript, transcript_words FROM recordings ORDER BY rkey").fetch_all(&ix.db).await.unwrap();
+        assert_eq!(
+            transcripts,
+            [
+                (
+                    "r1".into(),
+                    Some("It is a truth universally acknowledged".into()),
+                    Some(r#"[{"text":"It","startMs":0,"endMs":180},{"text":"is","startMs":180,"endMs":300}]"#.into())
+                ),
+                ("r2".into(), None, None),
+                ("r3".into(), Some("Hello".into()), None),
+            ],
+            "a malformed transcript is dropped and bad timings ignored; the recording is kept"
+        );
     }
 
     #[tokio::test]

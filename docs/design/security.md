@@ -135,6 +135,37 @@ The session cookie's attributes (`Set-Cookie`) are documented in
 `SameSite=Strict` (not sent on requests from other sites: CSRF), `Secure` (only
 over HTTPS).
 
+## Secrets in the browser: transcription API keys
+
+Users can set up speech-to-text services (Settings → Transcription) to fill in
+a recording's transcript. A service is a URL plus, often, a paid API key. The
+key is the user's own secret, so it stays on their device:
+
+- **Stored only in the browser** (`localStorage`, `voicebook.transcriptionEndpoints`).
+  It's never sent to the Voicebook backend or written to the user's repo, so
+  a breach of our server or database can't leak it. The record keeps only the
+  transcript's text, the model name, and whether it was edited; never the
+  service's address or key.
+- **Sent only to that service, only on request.** The browser calls the
+  service directly when the user presses Transcribe, with the key as a
+  `Bearer` token, `credentials: 'omit'` and `referrerPolicy: 'no-referrer'`.
+  Only `https://` URLs are accepted (plain `http://` to `localhost` too,
+  when the page itself is local): a key sent over plain HTTP could be read
+  on the network.
+- **Never shown or logged.** The key field is a password field, the list
+  shows "API key set", and error messages name the host, not the request.
+
+| Threat | What the attack looks like | Mitigation |
+|---|---|---|
+| **XSS reads the key** | Injected script runs `localStorage.getItem(…)` and sends the key to the attacker, who runs up the user's bill. | The CSP (`script-src 'self'`, no inline) stops injected code running at all; `connect-src` must allow any HTTPS host, so it can't stop code that does run from sending the key out. Any XSS is therefore also key theft: one more reason the CSP and React's escaping matter. |
+| **Shared or lost device** | The next person using the browser finds the service set up and uses the key, or reads it from developer tools. | Settings tells users to remove services before leaving a shared computer. Signing out doesn't remove them (they belong to the person at the device, not the account). Suggest keys with a spending limit. |
+| **Browser extensions** | An extension with access to the site reads page storage. | Out of our control; same as any web app. |
+| **A malicious "service" URL** | Someone persuades a user to enter an attacker's URL, which then receives their recordings. | Only the user can add services, and audio goes only to the service named next to the Transcribe button, when it's pressed. |
+
+The alternative, storing keys on the backend and transcribing there, would
+make Voicebook the custodian of every user's keys, and an attractive target;
+it would also send audio through our server.
+
 ## Reviews
 
 Security reviews are recorded in [`../sec_revs/`](../sec_revs/), one file per

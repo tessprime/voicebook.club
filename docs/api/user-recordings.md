@@ -17,6 +17,7 @@ Cookie: __Host-vb_session=…
 |---|---|---|
 | `limit` | 50 | Clamped to 1–200 |
 | `before` | none | RFC 3339 UTC; only recordings created strictly before it |
+| `since` | none | RFC 3339 UTC; only recordings created at or after it (see [Paging](README.md#paging)) |
 
 ## Response
 
@@ -39,12 +40,12 @@ sequenceDiagram
     participant A as Backend
     participant D as SQLite
     participant P as Author's PDS
-    B->>A: GET /api/users/{did}/recordings?limit&before (Cookie)
+    B->>A: GET /api/users/{did}/recordings?limit&before&since (Cookie)
     Note over A,D: session check (see README)
     alt target not admitted
         A-->>B: 403 not_invited
     end
-    A->>D: SELECT recordings JOIN members WHERE did = ?<br/>AND created_at < before ORDER BY created_at DESC LIMIT ?
+    A->>D: SELECT recordings JOIN members WHERE did = ?<br/>AND created_at < before AND created_at >= since ORDER BY created_at DESC LIMIT ?
     D-->>A: rows
     A->>A: audioUrl = {member's PDS}/xrpc/com.atproto.sync.getBlob?did&cid
     A-->>B: 200 [Recording, …]

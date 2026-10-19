@@ -94,9 +94,11 @@ Each endpoint is documented, with a sequence diagram, in
 | `GET /metrics` | Prometheus metrics |
 | `GET /api/members` | known Voicebook members |
 | `POST /api/members/{did}/refresh` | re-read an account's repo now, instead of waiting for Jetstream |
-| `GET /api/users/{did}/recordings?limit&before` | a user's recordings, newest first |
+| `GET /api/users/{did}/recordings?limit&before&since` | a user's recordings, newest first |
+| `GET /api/users/{did}/recordings/{rkey}` | one recording, with its transcript's word timings |
 | `GET /api/users/{did}/calendar?month=YYYY-MM&tzOffsetMinutes` | practice days in the viewer's time zone |
-| `GET /api/users/{did}/friends/activity?limit&before` | recent recordings by members `did` follows |
+| `GET /api/users/{did}/friends/activity?limit&before&since` | recent recordings by members `did` follows |
+| `GET /api/users/{did}/friends/calendar?month&tzOffsetMinutes` | practice days in a month for each member `did` follows |
 | `POST /api/admin/reindex` | re-fetch every member and listed account from their PDSes (admins only) |
 | `GET/POST/DELETE /api/session` | sign-in to the backend with a service-auth token, and sign-out |
 

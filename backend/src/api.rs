@@ -2,6 +2,7 @@
 //! obtained from a service-auth token (see auth.rs and docs/design/auth.md);
 //! only `/api/health` and the session endpoints are open.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -62,8 +63,10 @@ pub fn router(state: AppState, options: RouterOptions) -> Router {
         .route("/api/members", get(members))
         .route("/api/members/{did}/refresh", post(refresh_member))
         .route("/api/users/{did}/recordings", get(recordings))
+        .route("/api/users/{did}/recordings/{rkey}", get(recording))
         .route("/api/users/{did}/calendar", get(calendar))
         .route("/api/users/{did}/friends/activity", get(friends_activity))
+        .route("/api/users/{did}/friends/calendar", get(friends_calendar))
         .route("/api/admin/reindex", post(reindex))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_session));
     let router = Router::new()
@@ -169,6 +172,9 @@ pub enum ApiError {
     NotInvited,
     /// Signed in, but not allowed to do this (e.g. admin-only).
     Forbidden,
+    /// Malformed parameters; the message says what was expected.
+    BadRequest(&'static str),
+    NotFound,
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
@@ -187,6 +193,8 @@ impl IntoResponse for ApiError {
             Self::NotSignedIn => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "not_signed_in" }))).into_response(),
             Self::NotInvited => (StatusCode::FORBIDDEN, Json(json!({ "error": "not_invited" }))).into_response(),
             Self::Forbidden => (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response(),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response(),
+            Self::NotFound => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
         }
     }
 }
@@ -240,6 +248,7 @@ struct RecordingRow {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    transcript: Option<String>,
     blob_cid: String,
     mime_type: Option<String>,
     size_bytes: Option<i64>,
@@ -256,6 +265,7 @@ struct Recording {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    transcript: Option<String>,
     mime_type: Option<String>,
     size_bytes: Option<i64>,
     /// Served directly by the author's PDS; the backend never proxies audio.
@@ -274,6 +284,7 @@ impl From<RecordingRow> for Recording {
             chapter: row.chapter,
             duration_ms: row.duration_ms,
             notes: row.notes,
+            transcript: row.transcript,
             mime_type: row.mime_type,
             size_bytes: row.size_bytes,
             audio_url,
@@ -282,7 +293,7 @@ impl From<RecordingRow> for Recording {
 }
 
 const RECORDING_COLUMNS: &str = "SELECT r.uri, r.did, m.handle, m.pds_url, r.created_at, r.work, r.chapter, r.duration_ms,
-            r.notes, r.blob_cid, r.mime_type, r.size_bytes
+            r.notes, r.transcript, r.blob_cid, r.mime_type, r.size_bytes
      FROM recordings r JOIN members m ON m.did = r.did";
 
 #[derive(Deserialize)]
@@ -290,6 +301,8 @@ struct Page {
     limit: Option<i64>,
     /// Only recordings created strictly before this RFC 3339 UTC timestamp.
     before: Option<String>,
+    /// Only recordings created at or after this RFC 3339 UTC timestamp.
+    since: Option<String>,
 }
 
 impl Page {
@@ -305,15 +318,44 @@ async fn recordings(
 ) -> ApiResult<Vec<Recording>> {
     state.require_access(&did)?;
     let rows: Vec<RecordingRow> = sqlx::query_as(&format!(
-        "{RECORDING_COLUMNS} WHERE r.did = ? AND (? IS NULL OR r.created_at < ?) ORDER BY r.created_at DESC LIMIT ?"
+        "{RECORDING_COLUMNS} WHERE r.did = ? AND (? IS NULL OR r.created_at < ?) AND (? IS NULL OR r.created_at >= ?)
+         ORDER BY r.created_at DESC LIMIT ?"
     ))
     .bind(&did)
     .bind(&page.before)
     .bind(&page.before)
+    .bind(&page.since)
+    .bind(&page.since)
     .bind(page.limit())
     .fetch_all(&state.db)
     .await?;
     Ok(Json(rows.into_iter().map(Recording::from).collect()))
+}
+
+/// One recording, with its transcript's word timings (left out of lists, as
+/// they can be large).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingDetail {
+    #[serde(flatten)]
+    recording: Recording,
+    /// `[{text, startMs, endMs}]`, or null without timings.
+    transcript_words: Option<serde_json::Value>,
+}
+
+async fn recording(State(state): State<AppState>, Path((did, rkey)): Path<(String, String)>) -> ApiResult<RecordingDetail> {
+    state.require_access(&did)?;
+    let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT uri, transcript_words FROM recordings WHERE did = ? AND rkey = ?")
+        .bind(&did)
+        .bind(&rkey)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((uri, words)) = row else {
+        return Err(ApiError::NotFound);
+    };
+    let row: RecordingRow = sqlx::query_as(&format!("{RECORDING_COLUMNS} WHERE r.uri = ?")).bind(&uri).fetch_one(&state.db).await?;
+    let transcript_words = words.map(|words| serde_json::from_str(&words)).transpose()?;
+    Ok(Json(RecordingDetail { recording: Recording::from(row), transcript_words }))
 }
 
 #[derive(Deserialize)]
@@ -325,6 +367,20 @@ struct CalendarQuery {
     /// days match their local calendar.
     #[serde(default)]
     tz_offset_minutes: i64,
+}
+
+impl CalendarQuery {
+    /// Validates the query; returns the SQLite modifier that shifts UTC
+    /// timestamps into the viewer's time zone.
+    fn shift(&self) -> Result<String, ApiError> {
+        let valid_month = self.month.len() == 7
+            && self.month.as_bytes()[4] == b'-'
+            && self.month.chars().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit());
+        if !valid_month || self.tz_offset_minutes.abs() > 14 * 60 {
+            return Err(ApiError::BadRequest("expected month=YYYY-MM and |tzOffsetMinutes| <= 840"));
+        }
+        Ok(format!("{:+} minutes", self.tz_offset_minutes))
+    }
 }
 
 #[derive(Serialize, FromRow)]
@@ -339,15 +395,9 @@ async fn calendar(
     State(state): State<AppState>,
     Path(did): Path<String>,
     Query(query): Query<CalendarQuery>,
-) -> Result<Json<Vec<PracticeDay>>, Response> {
-    state.require_access(&did).map_err(IntoResponse::into_response)?;
-    let valid_month = query.month.len() == 7
-        && query.month.as_bytes()[4] == b'-'
-        && query.month.chars().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit());
-    if !valid_month || query.tz_offset_minutes.abs() > 14 * 60 {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "expected month=YYYY-MM and |tzOffsetMinutes| <= 840" }))).into_response());
-    }
-    let shift = format!("{:+} minutes", query.tz_offset_minutes);
+) -> ApiResult<Vec<PracticeDay>> {
+    state.require_access(&did)?;
+    let shift = query.shift()?;
     let days = sqlx::query_as(
         "SELECT date(created_at, ?1) AS date, count(*) AS recording_count, sum(duration_ms) AS duration_ms
          FROM recordings
@@ -358,8 +408,7 @@ async fn calendar(
     .bind(&did)
     .bind(&query.month)
     .fetch_all(&state.db)
-    .await
-    .map_err(|err| ApiError::from(err).into_response())?;
+    .await?;
     Ok(Json(days))
 }
 
@@ -383,9 +432,79 @@ async fn friends_activity(
     if let Some(before) = &page.before {
         query.push(" AND r.created_at < ").push_bind(before);
     }
+    if let Some(since) = &page.since {
+        query.push(" AND r.created_at >= ").push_bind(since);
+    }
     query.push(" ORDER BY r.created_at DESC LIMIT ").push_bind(page.limit());
     let rows: Vec<RecordingRow> = query.build_query_as().fetch_all(&state.db).await?;
     Ok(Json(rows.into_iter().map(Recording::from).collect()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FriendCalendar {
+    did: String,
+    handle: Option<String>,
+    days: Vec<PracticeDay>,
+}
+
+#[derive(FromRow)]
+struct FriendDay {
+    did: String,
+    #[sqlx(flatten)]
+    day: PracticeDay,
+}
+
+/// Practice days in one month for every member the account follows, including
+/// those who didn't practice that month (so the viewer can pick among them).
+async fn friends_calendar(
+    State(state): State<AppState>,
+    Path(did): Path<String>,
+    Query(query): Query<CalendarQuery>,
+) -> ApiResult<Vec<FriendCalendar>> {
+    state.require_access(&did)?;
+    let shift = query.shift()?;
+    let follows = state.indexer.follows_of(&did).await?;
+    let follows: Vec<&String> = follows.iter().filter(|followed| **followed != did).collect();
+    if follows.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut members: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT did, handle FROM members WHERE active = 1 AND did IN (");
+    let mut dids = members.separated(", ");
+    for followed in &follows {
+        dids.push_bind(*followed);
+    }
+    members.push(") ORDER BY lower(coalesce(handle, did))");
+    let members: Vec<(String, Option<String>)> = members.build_query_as().fetch_all(&state.db).await?;
+    if members.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut days: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT did, date(created_at, ");
+    days.push_bind(&shift)
+        .push(") AS date, count(*) AS recording_count, sum(duration_ms) AS duration_ms FROM recordings WHERE strftime('%Y-%m', created_at, ")
+        .push_bind(&shift)
+        .push(") = ")
+        .push_bind(&query.month)
+        .push(" AND did IN (");
+    let mut dids = days.separated(", ");
+    for (member, _) in &members {
+        dids.push_bind(member);
+    }
+    days.push(") GROUP BY did, 2 ORDER BY did, 2");
+    let rows: Vec<FriendDay> = days.build_query_as().fetch_all(&state.db).await?;
+
+    let mut by_did: HashMap<String, Vec<PracticeDay>> = HashMap::new();
+    for row in rows {
+        by_did.entry(row.did).or_default().push(row.day);
+    }
+    Ok(Json(
+        members
+            .into_iter()
+            .map(|(did, handle)| FriendCalendar { days: by_did.remove(&did).unwrap_or_default(), did, handle })
+            .collect(),
+    ))
 }
 
 /// Asks the backend to re-read an account's repo now, e.g. right after it

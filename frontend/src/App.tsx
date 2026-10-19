@@ -1,12 +1,24 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 
-import { NotInvitedError, SignInBusyError, backendSession, refreshMember, setReauthenticate, signInToBackend, signOutOfBackend } from './api'
+import {
+  NotInvitedError,
+  SignInBusyError,
+  backendSession,
+  refreshMember,
+  setReauthenticate,
+  signInToBackend,
+  signOutOfBackend,
+  type Recording,
+} from './api'
 import { initSession, signIn, signOut, type Session } from './auth'
+import { RecordingDetails } from './components/RecordingDetails'
+import { SelectionContext } from './selection'
 import { Friends } from './views/Friends'
 import { Practice } from './views/Practice'
 import { Recordings } from './views/Recordings'
+import { Settings } from './views/Settings'
 
-const TABS = ['Practice', 'Recordings', 'Friends'] as const
+const TABS = ['Practice', 'Recordings', 'Friends', 'Settings'] as const
 type Tab = (typeof TABS)[number]
 
 type AuthState =
@@ -20,6 +32,19 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('Practice')
   // Bumped when the backend has re-read the user's repo, to reload the views.
   const [dataVersion, setDataVersion] = useState(0)
+  const [{ selected, playRequest }, setSelection] = useState<{ selected: Recording | null; playRequest: number | null }>({
+    selected: null,
+    playRequest: null,
+  })
+  const selection = useMemo(
+    () => ({
+      selected,
+      playRequest,
+      select: (recording: Recording | null, options?: { play?: boolean }) =>
+        setSelection((s) => ({ selected: recording, playRequest: options?.play ? (s.playRequest ?? 0) + 1 : null })),
+    }),
+    [selected, playRequest],
+  )
 
   useEffect(() => {
     initSession().then(
@@ -94,11 +119,26 @@ export default function App() {
           </button>
         </span>
       </header>
-      <main>
-        {tab === 'Practice' && <Practice session={session} dataVersion={dataVersion} />}
-        {tab === 'Recordings' && <Recordings session={session} dataVersion={dataVersion} />}
-        {tab === 'Friends' && <Friends session={session} dataVersion={dataVersion} />}
-      </main>
+      <SelectionContext.Provider value={selection}>
+        <div className={selected ? 'layout with-details' : 'layout'}>
+          <main>
+            {tab === 'Practice' && <Practice session={session} dataVersion={dataVersion} />}
+            {tab === 'Recordings' && <Recordings session={session} dataVersion={dataVersion} />}
+            {tab === 'Friends' && <Friends session={session} dataVersion={dataVersion} />}
+            {tab === 'Settings' && <Settings />}
+          </main>
+          {selected && (
+            <RecordingDetails
+              key={selected.uri}
+              recording={selected}
+              playRequest={playRequest}
+              session={session}
+              onClose={() => selection.select(null)}
+              onChanged={() => setDataVersion((v) => v + 1)}
+            />
+          )}
+        </div>
+      </SelectionContext.Provider>
     </>
   )
 }

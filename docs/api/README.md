@@ -16,8 +16,10 @@ is in [`../design/auth.md`](../design/auth.md); routing is in
 | `GET /api/members` | session | [members.md](members.md) |
 | `POST /api/members/{did}/refresh` | session (self or admin), CSRF header | [member-refresh.md](member-refresh.md) |
 | `GET /api/users/{did}/recordings` | session | [user-recordings.md](user-recordings.md) |
+| `GET /api/users/{did}/recordings/{rkey}` | session | [user-recording.md](user-recording.md) |
 | `GET /api/users/{did}/calendar` | session | [user-calendar.md](user-calendar.md) |
 | `GET /api/users/{did}/friends/activity` | session | [user-friends-activity.md](user-friends-activity.md) |
+| `GET /api/users/{did}/friends/calendar` | session | [user-friends-calendar.md](user-friends-calendar.md) |
 | `POST /api/admin/reindex` | session (admin), CSRF header | [admin-reindex.md](admin-reindex.md) |
 | `GET /client-metadata.json` | none | [client-metadata.md](client-metadata.md) |
 | `GET /.well-known/did.json` | none | [did-document.md](did-document.md) |
@@ -100,6 +102,7 @@ Returned by the recordings and friends-activity endpoints, newest first.
   "chapter": "3",
   "durationMs": 3000,
   "notes": null,
+  "transcript": "It is a truth universally acknowledged…",
   "mimeType": "audio/ogg; codecs=opus",
   "sizeBytes": 27360,
   "audioUrl": "https://pds.example/xrpc/com.atproto.sync.getBlob?did=did:plc:wzraxbnzzz4fxt72jhvuswbb&cid=bafkrei…"
@@ -107,6 +110,8 @@ Returned by the recordings and friends-activity endpoints, newest first.
 ```
 
 - `createdAt` is UTC, normalized from the record.
+- `transcript` is the record's `transcript.text`, or null (also when the
+  record's transcript is malformed: the recording is still indexed).
 - `audioUrl` points at the author's PDS: the browser fetches audio directly,
   and the backend never proxies it. Null if the author's PDS is unknown.
 - `handle` is display data and may change; `did` is the identifier.
@@ -116,3 +121,9 @@ Returned by the recordings and friends-activity endpoints, newest first.
 `limit` (default 50, clamped to 1–200) and `before` (an RFC 3339 UTC
 timestamp: only recordings created strictly before it). To page, pass the
 last item's `createdAt` as `before`.
+
+`since` (an RFC 3339 UTC timestamp: only recordings created at or after it)
+bounds a range from below; with `before`, it selects e.g. one local day.
+Timestamps compare as text, so send the same form as `createdAt`
+(`YYYY-MM-DDTHH:MM:SS.sssZ`, which is what JavaScript's `toISOString()`
+produces).

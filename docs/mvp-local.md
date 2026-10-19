@@ -179,6 +179,7 @@ The simplest MVP flow is:
 3. User records in the browser, or selects an audio file from disk.
    - Browser recordings are written to IndexedDB chunk by chunk while recording, and kept there until saved: a closed tab or failed upload loses nothing, and unsaved recordings are offered back on the Practice view.
    - The record's `createdAt` is when recording started, not when it was saved.
+   - Optionally, `Transcribe` sends the audio to a speech-to-text service the user set up in Settings, and fills in an editable transcript. Services, including API keys, are stored only in the browser (`localStorage`); the backend never sees them. The transcript is kept with the draft, so a reload doesn't lose it.
 4. The browser uploads the audio to the user's PDS (`com.atproto.repo.uploadBlob`).
 5. The browser creates a `club.voicebook.recording` record referencing the blob (`com.atproto.repo.createRecord`).
 6. The PDS emits the commit on its firehose; Jetstream relays it; the backend indexes it.
@@ -298,6 +299,10 @@ The exact Lexicon should be versioned in the repository.
 - `chapter`
 - `durationMs`
 - `notes`
+- `transcript`: `{text, model?, edited?}`, what was read, from a
+  speech-to-text service the reader chose (§8). `model` names the model that
+  produced it; `edited` says whether the reader changed the text afterwards.
+  The service's address is never recorded.
 
 The local MVP should prefer a small schema that can evolve later.
 
@@ -427,9 +432,11 @@ Every endpoint except `/api/health` and `/api/session` requires a session (see [
 GET  /api/health
 GET|POST|DELETE /api/session        sign-in with a service-auth token; sign-out
 GET  /api/members
-GET  /api/users/:did/recordings?limit&before
+GET  /api/users/:did/recordings?limit&before&since
+GET  /api/users/:did/recordings/:rkey     one recording, with word timings
 GET  /api/users/:did/calendar?month=YYYY-MM&tzOffsetMinutes
-GET  /api/users/:did/friends/activity?limit&before
+GET  /api/users/:did/friends/activity?limit&before&since
+GET  /api/users/:did/friends/calendar?month&tzOffsetMinutes
 
 POST /api/admin/reindex              admins only
 ```
