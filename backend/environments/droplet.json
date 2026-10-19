@@ -16,7 +16,8 @@
     "allowlist": [
       "did:plc:oq6rkprwln2i4rtv5gcignb6",
       "did:plc:qwf4izoyeyesijdeyjlity7g",
-      "did:plc:izc4epknbvpf2hk3gq7evk4k"
+      "did:plc:izc4epknbvpf2hk3gq7evk4k",
+      "did:plc:jxuloe3i5d2damf7spre2r3d"
     ],
     "admins": [
       "did:plc:oq6rkprwln2i4rtv5gcignb6"
