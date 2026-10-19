@@ -1,5 +1,10 @@
 name: voicebook
 region: nyc
+# The spec replaces the app's whole configuration: a domain left out here is
+# detached on the next deploy.
+domains:
+  - domain: voicebook.club
+    type: PRIMARY
 services:
   - name: web
     image:

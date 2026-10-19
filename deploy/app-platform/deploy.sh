@@ -68,6 +68,14 @@ step "Deploy"
 deploy_spec=$(mktemp --suffix=.yaml)
 trap 'rm -f "$deploy_spec"' EXIT
 sed -E "s/^([[:space:]]*tag:).*/\1 $tag/" "$spec" > "$deploy_spec"
+# `apps update --spec` replaces the whole spec, so a domain attached in the
+# control panel but missing from app.yaml would be silently detached.
+if [[ -n $app_id ]]; then
+  live_domains=$(doctl apps spec get "$app_id" --format json | python3 -c 'import json,sys; print("\n".join(sorted(d["domain"] for d in json.load(sys.stdin).get("domains") or [])))')
+  spec_domains=$(sed -n 's/^[[:space:]]*-[[:space:]]*domain:[[:space:]]*//p' "$spec" | sort)
+  missing=$(comm -23 <(echo "$live_domains") <(echo "$spec_domains") | sed '/^$/d')
+  [[ -z $missing ]] || fail "the live app has domains that $spec doesn't list (deploying would detach them): $missing"
+fi
 if $dry_run; then
   if [[ -n $app_id ]]; then echo "would update app $app_id with:"; else echo "would create the app with:"; fi
   cat "$deploy_spec"
