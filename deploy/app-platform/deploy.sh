@@ -67,7 +67,8 @@ fi
 step "Deploy"
 deploy_spec=$(mktemp --suffix=.yaml)
 trap 'rm -f "$deploy_spec"' EXIT
-sed -E "s/^([[:space:]]*tag:).*/\1 $tag/" "$spec" > "$deploy_spec"
+# Quoted: YAML reads some hashes as numbers (63626e6 is 63626 × 10^6).
+sed -E "s/^([[:space:]]*tag:).*/\1 \"$tag\"/" "$spec" > "$deploy_spec"
 # `apps update --spec` replaces the whole spec, so a domain attached in the
 # control panel but missing from app.yaml would be silently detached.
 if [[ -n $app_id ]]; then
