@@ -234,9 +234,12 @@ test('a transcription service set up in Settings fills in the transcript, which 
   await expect(words).toHaveCount(6)
   await expect(details.getByText('Edited transcript')).toBeVisible()
 
+  // It plays a WAV of the decoded audio (the upload was Ogg), so seeking is exact.
+  const audio = details.locator('audio')
+  expect(await audio.evaluate(async (el: HTMLAudioElement) => (await (await fetch(el.src)).blob()).type)).toBe('audio/wav')
+
   // Clicking a word seeks there and highlights it.
   await words.filter({ hasText: 'truth' }).click()
-  const audio = details.locator('audio')
   await expect.poll(() => audio.evaluate((el: HTMLAudioElement) => el.currentTime)).toBeCloseTo(0.9, 1)
   await expect(words.filter({ hasText: 'truth' })).toHaveClass(/current/)
 

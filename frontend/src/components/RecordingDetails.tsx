@@ -6,16 +6,22 @@ import { formatClock, formatDateTime, formatDuration, workLabel } from '../forma
 import { transcribe, type TimedWord, type TranscriptionEndpoint } from '../transcription'
 import '../vendor/voice-spectrogram/voice-spectrogram.js'
 import type { SeekEvent, VoiceSpectrogram } from '../vendor/voice-spectrogram/voice-spectrogram'
+import { audioBufferToWav, isWav } from '../wav'
 import { TranscribeControls } from './TranscribeControls'
 
 /**
- * Longest recording drawn as a spectrogram. Decoded audio takes 64 kB per
- * second at 16 kHz, so this caps it near 60 MB; longer recordings still play
- * and show their words.
+ * Longest recording decoded, for the spectrogram and exact seeking. Decoded
+ * audio takes 96 kB per second per channel at 24 kHz (about 170 MB for 15
+ * minutes of stereo, while the WAV is made), plus 48 kB per second for the
+ * WAV. Longer recordings play their own file (seeking may be off; see
+ * wav.ts) and still show their words.
  */
-const MAX_SPECTROGRAM_SECONDS = 15 * 60
-/** Decoding rate: the spectrogram shows up to 5 kHz, so 16 kHz is plenty. */
-const DECODE_SAMPLE_RATE = 16_000
+const MAX_DECODE_SECONDS = 15 * 60
+/**
+ * Decoding rate, for both the spectrogram (up to 5 kHz) and playback: 24 kHz
+ * keeps the voice up to 12 kHz, including sibilants and breath.
+ */
+const DECODE_SAMPLE_RATE = 24_000
 
 type Audio =
   | { kind: 'loading' }
@@ -62,9 +68,10 @@ export function RecordingDetails({
     }
   }, [recording.uri])
 
-  // The whole file, fetched once into an object URL. PDSes don't honor Range
-  // requests, so the browser couldn't seek in a streamed Ogg file or find its
-  // duration; and the spectrogram needs the decoded samples anyway.
+  // The whole file, fetched once. PDSes don't honor Range requests, so the
+  // browser couldn't seek in a streamed file or find its duration. Decoded
+  // for the spectrogram, and played as a WAV of the decoded audio, so seeking
+  // (clicking a word or the spectrogram) lands exactly where it says.
   useEffect(() => {
     let stale = false
     let url: string | null = null
@@ -75,10 +82,12 @@ export function RecordingDetails({
       if (!res.ok) throw new Error(String(res.status))
       const blob = await res.blob()
       if (stale) return
-      url = URL.createObjectURL(blob)
-      const tooLong = (recording.durationMs ?? 0) > MAX_SPECTROGRAM_SECONDS * 1000
+      const tooLong = (recording.durationMs ?? 0) > MAX_DECODE_SECONDS * 1000
       const buffer = tooLong ? null : await decode(blob).catch(() => null)
-      if (!stale) setAudio({ kind: 'ready', blob, url, buffer, tooLong })
+      const playable = buffer && !(await isWav(blob)) ? await audioBufferToWav(buffer) : blob
+      if (stale) return
+      url = URL.createObjectURL(playable)
+      setAudio({ kind: 'ready', blob, url, buffer, tooLong })
     })().catch(() => !stale && setAudio({ kind: 'error' }))
     return () => {
       stale = true

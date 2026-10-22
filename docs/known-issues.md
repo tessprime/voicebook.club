@@ -1,58 +1,28 @@
 # Known issues
 
-Problems seen but not yet fixed. Each entry: what's seen, what's known, and
-what to check next.
+Problems seen: what's seen, what's known, and what to check next. Fixed
+ones stay, marked fixed, with the cause, so they're recognized if they
+come back.
 
-## Transcript words drift from the audio
+## Transcript words drift from the audio: fixed
 
-*Seen 2026-10-19, in the recording details panel.*
+*Seen 2026-10-19 in the recording details panel; fixed 2026-10-21.*
 
-The highlighted word (and the word row under the spectrogram) drifts away
-from what's actually being said during playback.
+The highlighted word, and the word row under the spectrogram, drifted
+further from what was being said over a recording. The case looked at was
+an uploaded 13-minute VBR MP3 (rkey `3mxdy5d5mhc2o`), whose transcript
+timings matched the file's length.
 
-**It's drift:** the gap grows over the recording (reported 2026-10-19).
+**Cause:** browsers seek in VBR MP3 approximately, from the file's coarse
+Xing table (100 entries), then report the time asked for: MP3 frames carry
+no timestamps to correct with. gender-voice-visualization hit the same
+thing on the same recording and measured it in Chromium: seeks landed
+between -5.1 s and +0.5 s from where they said (its commit `7f076d1`).
+The panel seeks whenever a word or the spectrogram is clicked.
 
-**First case looked at** (rkey `3mxdy5d5mhc2o`, "Giden The Ninth"): an
-uploaded MP3, not a browser recording. 789.1 s long, 48 kHz stereo,
-**variable bitrate** (frames from 64 to 256 kbps, average 87 kbps), with a
-Xing header. Transcribed by `whisper-large-v3-turbo`: 1,936 words, the last
-ending at 785.2 s. So the transcript's timeline roughly agrees with the
-file's length overall.
-
-**Leading suspect: seeking in a VBR MP3.** Browsers can't seek precisely in
-variable-bitrate MP3s: they estimate the byte position from the Xing
-header's coarse table (100 points) or the average bitrate. After a seek,
-`currentTime` reports the time asked for while the audio plays from
-somewhere nearby, and the error tends to grow the further into the file
-the seek goes. The panel seeks whenever a word or the spectrogram is
-clicked. Untested; to check, play from the start *without clicking
-anywhere*: if words stay in sync, seeking is the cause.
-
-If so, possible fixes:
-- Play through Web Audio from the decoded samples (the panel already
-  decodes the file, though only at 16 kHz for the spectrogram), which seeks
-  to the exact sample.
-- Re-encode uploads in the browser before saving (to Opus, or constant
-  bitrate), so stored files seek precisely everywhere.
-
-Other things to establish:
-- **Other recordings?** Recorded in the browser (WebM/Opus from
-  `MediaRecorder`) or uploaded files; which transcription service and model
-  (the record's `transcript.model`).
-- **Which side is wrong?** Compare a word's `startMs` (from
-  `GET /api/users/{did}/recordings/{rkey}`) with where the word is heard
-  in a separate player, e.g. Audacity, on the same file.
-
-Possible causes, unconfirmed:
-
-- **The service's timestamps.** Whisper's word timings come from
-  30-second windows and are known to slip over long audio; some servers
-  realign them better than others.
-- **Browser recordings' timing.** If `MediaRecorder`'s WebM timestamps
-  don't match the audio's real length (we patch the duration with
-  `fix-webm-duration`), the transcriber and the browser's player could
-  measure time differently, which would grow over the recording.
-- **The panel itself.** It plays the original file (`<audio>`) and draws the
-  spectrogram from a copy decoded at 16 kHz; the highlighted word follows
-  the `<audio>` element's `currentTime`, so it shouldn't drift, but this
-  hasn't been checked.
+**Fix** (`frontend/src/wav.ts`, as in that project): the panel decodes the
+audio (now at 24 kHz, for the spectrogram and playback) and plays a mono
+16-bit WAV of it, which seeks exactly. That project measured 20-53 ms
+after the same fix, where it had been seconds. Files that are already
+WAV play as they are. Recordings over 15 minutes aren't decoded, so
+they still play their own file and can still drift.
