@@ -236,7 +236,7 @@ test('a transcription service set up in Settings fills in the transcript, which 
 
   // It plays a WAV of the decoded audio (the upload was Ogg), so seeking is exact.
   const audio = details.locator('audio')
-  expect(await audio.evaluate(async (el: HTMLAudioElement) => (await (await fetch(el.src)).blob()).type)).toBe('audio/wav')
+  await expect(audio).toHaveAttribute('data-source', 'wav')
 
   // Clicking a word seeks there and highlights it.
   await words.filter({ hasText: 'truth' }).click()

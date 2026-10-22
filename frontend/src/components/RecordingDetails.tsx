@@ -26,7 +26,15 @@ const DECODE_SAMPLE_RATE = 24_000
 type Audio =
   | { kind: 'loading' }
   | { kind: 'error' }
-  | { kind: 'ready'; blob: Blob; url: string; buffer: AudioBuffer | null; tooLong: boolean }
+  | {
+      kind: 'ready'
+      blob: Blob
+      url: string
+      /** What's played: a WAV of the decoded audio (seeks exactly), or the file itself. */
+      source: 'wav' | 'original'
+      buffer: AudioBuffer | null
+      tooLong: boolean
+    }
 
 type Transcribing = { kind: 'idle' } | { kind: 'busy' } | { kind: 'error'; message: string } | { kind: 'pending' }
 
@@ -84,10 +92,10 @@ export function RecordingDetails({
       if (stale) return
       const tooLong = (recording.durationMs ?? 0) > MAX_DECODE_SECONDS * 1000
       const buffer = tooLong ? null : await decode(blob).catch(() => null)
-      const playable = buffer && !(await isWav(blob)) ? await audioBufferToWav(buffer) : blob
+      const wav = buffer && !(await isWav(blob)) ? await audioBufferToWav(buffer) : null
       if (stale) return
-      url = URL.createObjectURL(playable)
-      setAudio({ kind: 'ready', blob, url, buffer, tooLong })
+      url = URL.createObjectURL(wav ?? blob)
+      setAudio({ kind: 'ready', blob, url, source: wav ? 'wav' : 'original', buffer, tooLong })
     })().catch(() => !stale && setAudio({ kind: 'error' }))
     return () => {
       stale = true
@@ -228,7 +236,7 @@ export function RecordingDetails({
               {audio.tooLong ? 'This recording is too long to draw.' : 'This browser couldn’t decode the audio to draw it.'}
             </p>
           )}
-          <audio ref={player} controls src={audio.url} className="details-audio" />
+          <audio ref={player} controls src={audio.url} data-source={audio.source} className="details-audio" />
         </>
       )}
 
