@@ -124,7 +124,7 @@ services:
   # Grafana, Tempo (traces), Loki (logs), Prometheus (metrics) and an
   # OpenTelemetry Collector in one container, for local development only.
   observability:
-    image: grafana/otel-lgtm:0.35.0
+    image: grafana/otel-lgtm:0.38.0
     network_mode: host
     environment:
       # Anonymous users are Admin in this image; keep Grafana off the network.
