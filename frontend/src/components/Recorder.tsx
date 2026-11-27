@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { appendChunk, createDraft, deleteDraft, draftAudio, updateDraft, type Draft } from '../drafts'
+import { appendChunk, createDraft, deleteDraft, draftAudio, updateDraft, type Draft, type DraftFields } from '../drafts'
 import { formatClock } from '../format'
 
 // Opus in WebM (Chrome, Firefox) or Ogg; MP4 for Safari.
@@ -18,7 +18,7 @@ type State =
 type Props = {
   /** A finished draft to show instead of starting fresh (e.g. one restored after a reload). */
   draft: Draft | null
-  fields: Pick<Draft, 'work' | 'chapter' | 'notes'>
+  fields: DraftFields
   onDraftChange: (draft: Draft | null) => void
   disabled?: boolean
 }
@@ -191,7 +191,7 @@ class RecordingSession {
     recorder.start(CHUNK_MS)
   }
 
-  static async start(fields: Pick<Draft, 'work' | 'chapter' | 'notes'>, callbacks: Callbacks): Promise<RecordingSession> {
+  static async start(fields: DraftFields, callbacks: Callbacks): Promise<RecordingSession> {
     // Raw input: processing meant for calls (noise suppression, automatic
     // gain) changes the character of the voice being practiced.
     const stream = await navigator.mediaDevices.getUserMedia({

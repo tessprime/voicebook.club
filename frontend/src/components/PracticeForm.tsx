@@ -1,9 +1,12 @@
 import { useState, type FormEvent } from 'react'
 
+import { ACTIVITIES, EXERCISES, FREE_SPEECH, asActivity, type Activity } from '../activities'
 import { audioDuration, createRecording, waitForIndexed } from '../api'
 import type { Session } from '../auth'
 import { deleteDraft, draftAudio, updateDraft, type Draft, type DraftTranscript } from '../drafts'
+import { BUILTIN_PASSAGES, findPassage } from '../passages'
 import { transcribe, type TranscriptionEndpoint } from '../transcription'
+import { PassageText } from './PassageText'
 import { Recorder } from './Recorder'
 import { TranscribeControls } from './TranscribeControls'
 
@@ -19,6 +22,9 @@ type Props = {
 }
 
 export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props) {
+  const [activity, setActivity] = useState<Activity>(asActivity(initialDraft?.activity))
+  const [passageId, setPassageId] = useState(findPassage(initialDraft?.passageId)?.id ?? BUILTIN_PASSAGES[0].id)
+  // The book, free-speech topic or exercise (a passage's title comes from the passage).
   const [work, setWork] = useState(initialDraft?.work ?? '')
   const [chapter, setChapter] = useState(initialDraft?.chapter ?? '')
   const [notes, setNotes] = useState(initialDraft?.notes ?? '')
@@ -26,7 +32,9 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
   const [draft, setDraft] = useState<Draft | null>(initialDraft ?? null)
   const [file, setFile] = useState<File | null>(null)
   const [status, setStatus] = useState<Status>({ kind: 'idle' })
-  const [transcript, setTranscript] = useState(initialDraft?.transcript?.text ?? '')
+  const passage = activity === 'passage' ? findPassage(passageId) : undefined
+  // A passage's text is its transcript unless a transcription service fills one in.
+  const [transcript, setTranscript] = useState(initialDraft?.transcript?.text ?? passage?.text ?? '')
   // What the service returned, if the transcript came from one.
   const [transcribed, setTranscribed] = useState<Omit<DraftTranscript, 'text'> | null>(
     initialDraft?.transcript
@@ -45,9 +53,28 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
     setFile(next)
   }
   function forgetTranscript() {
-    setTranscript('')
+    setTranscript(passage?.text ?? '')
     setTranscribed(null)
   }
+
+  /** Swaps a passage's text in the transcript field, unless it holds something else (typed or transcribed). */
+  function followPassage(from: string | undefined, to: string | undefined) {
+    if (!transcribed && (transcript === '' || transcript === from)) setTranscript(to ?? '')
+  }
+
+  function changeActivity(next: Activity) {
+    followPassage(passage?.text, next === 'passage' ? findPassage(passageId)?.text : undefined)
+    setActivity(next)
+    setWork(EXERCISES[next]?.[0] ?? '')
+  }
+
+  function changePassage(id: string) {
+    followPassage(passage?.text, findPassage(id)?.text)
+    setPassageId(id)
+  }
+
+  /** What the record's `work` will be: what was practiced. */
+  const title = passage ? passage.title : activity === 'freeSpeech' ? work.trim() || FREE_SPEECH : work.trim()
 
   function draftTranscript(): DraftTranscript | undefined {
     return transcribed || transcript.trim()
@@ -77,8 +104,14 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const fields = { work: work.trim(), chapter: chapter.trim(), notes: notes.trim() }
-    const text = transcript.trim()
+    const fields = {
+      activity,
+      passageId: passage?.id,
+      work: title,
+      chapter: activity === 'reading' ? chapter.trim() : '',
+      notes: notes.trim(),
+    }
+    const text = transcript.trim() || passage?.text || ''
     const recordTranscript = text
       ? {
           text,
@@ -133,13 +166,57 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
     <form className="panel practice-form" onSubmit={submit}>
       <h2>New practice</h2>
       <label>
-        Book or work
-        <input required value={work} onChange={(e) => setWork(e.target.value)} placeholder="Pride and Prejudice" disabled={saving} />
+        Activity
+        <select value={activity} onChange={(e) => changeActivity(e.target.value as Activity)} disabled={saving}>
+          {ACTIVITIES.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label}
+            </option>
+          ))}
+        </select>
       </label>
-      <label>
-        Chapter or passage <span className="muted">(optional)</span>
-        <input value={chapter} onChange={(e) => setChapter(e.target.value)} placeholder="3" disabled={saving} />
-      </label>
+      {activity === 'reading' && (
+        <>
+          <label>
+            Book or work
+            <input required value={work} onChange={(e) => setWork(e.target.value)} placeholder="Pride and Prejudice" disabled={saving} />
+          </label>
+          <label>
+            Chapter or passage <span className="muted">(optional)</span>
+            <input value={chapter} onChange={(e) => setChapter(e.target.value)} placeholder="3" disabled={saving} />
+          </label>
+        </>
+      )}
+      {activity === 'passage' && (
+        <label>
+          Passage
+          <select value={passageId} onChange={(e) => changePassage(e.target.value)} disabled={saving}>
+            {BUILTIN_PASSAGES.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.title}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {activity === 'freeSpeech' && (
+        <label>
+          Topic <span className="muted">(optional)</span>
+          <input value={work} onChange={(e) => setWork(e.target.value)} placeholder="My weekend" disabled={saving} />
+        </label>
+      )}
+      {EXERCISES[activity] && (
+        <label>
+          Exercise
+          <select value={work} onChange={(e) => setWork(e.target.value)} disabled={saving}>
+            {EXERCISES[activity].map((exercise) => (
+              <option key={exercise} value={exercise}>
+                {exercise}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label>
         Notes <span className="muted">(optional)</span>
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} disabled={saving} />
@@ -163,7 +240,12 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
       </div>
 
       {source === 'record' ? (
-        <Recorder draft={draft} fields={{ work, chapter, notes }} onDraftChange={changeDraft} disabled={saving} />
+        <Recorder
+          draft={draft}
+          fields={{ activity, passageId: passage?.id, work: title, chapter, notes }}
+          onDraftChange={changeDraft}
+          disabled={saving}
+        />
       ) : (
         <label>
           Audio file
@@ -171,9 +253,15 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
         </label>
       )}
 
+      {/* Below the record controls: press Record, then read straight down. */}
+      {passage && <PassageText passage={passage} />}
+
       <div className="transcript-field">
         <label>
-          Transcript <span className="muted">(optional; saved publicly with the recording)</span>
+          Transcript{' '}
+          <span className="muted">
+            {passage ? '(the passage text, unless you transcribe; saved publicly with the recording)' : '(optional; saved publicly with the recording)'}
+          </span>
           <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} rows={4} disabled={saving || transcribing === true} />
         </label>
         <TranscribeControls
@@ -200,7 +288,7 @@ export function PracticeForm({ session, initialDraft, onSaved, onCancel }: Props
         <button type="button" className="secondary" onClick={onCancel} disabled={saving}>
           {draft ? 'Close (keep recording)' : 'Cancel'}
         </button>
-        <button type="submit" disabled={saving || !work.trim() || !(recordingReady || uploadReady)}>
+        <button type="submit" disabled={saving || !title || !(recordingReady || uploadReady)}>
           Save recording
         </button>
       </div>

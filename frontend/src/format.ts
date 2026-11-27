@@ -56,6 +56,3 @@ export function relativeDay(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-export function workLabel(work: string, chapter: string | null): string {
-  return chapter ? `${work} — Chapter ${chapter}` : work
-}

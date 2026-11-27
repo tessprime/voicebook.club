@@ -1,5 +1,6 @@
 import type { Recording } from '../api'
-import { formatDateTime, formatDuration, workLabel } from '../format'
+import { recordingTitle } from '../activities'
+import { formatDateTime, formatDuration } from '../format'
 import { useSelection } from '../selection'
 
 export function RecordingItem({
@@ -20,7 +21,7 @@ export function RecordingItem({
       <div className="recording-meta">
         <button className="recording-work" aria-pressed={isSelected} title="Show details" onClick={() => select(isSelected ? null : recording)}>
           {dot !== undefined && <span className={`dot ${dot}`.trim()} aria-hidden />}
-          {workLabel(recording.work, recording.chapter)}
+          {recordingTitle(recording)}
         </button>
         <span className="muted">
           {showAuthor && <>@{recording.handle ?? recording.did} · </>}

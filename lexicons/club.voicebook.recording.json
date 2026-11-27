@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "A voice-practice recording: the reader's audio of one passage of a work.",
+      "description": "A voice-practice recording: reading from a book, a fixed passage, free speech, or a pitch or resonance exercise.",
       "key": "tid",
       "record": {
         "type": "object",
@@ -15,11 +15,22 @@
             "format": "datetime",
             "description": "When the practice happened. Practice days are derived from this."
           },
+          "activity": {
+            "type": "string",
+            "knownValues": ["reading", "passage", "freeSpeech", "pitch", "resonance"],
+            "maxLength": 64,
+            "description": "What kind of practice this was. Absent means reading (records from before activities existed)."
+          },
           "work": {
             "type": "string",
             "maxLength": 3000,
             "maxGraphemes": 300,
-            "description": "Title of the book or work being read."
+            "description": "Title of what was practiced: the book being read, the passage, the free-speech topic, or the exercise."
+          },
+          "passage": {
+            "type": "ref",
+            "ref": "#passageRef",
+            "description": "For a passage: which one, so recordings of the same text can be compared."
           },
           "chapter": {
             "type": "string",
@@ -48,6 +59,17 @@
             "accept": ["audio/*"],
             "maxSize": 100000000
           }
+        }
+      }
+    },
+    "passageRef": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 640,
+          "description": "A built-in passage (\"builtin:<name>\") or, later, the AT URI of the reader's own passage record."
         }
       }
     },

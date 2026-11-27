@@ -102,6 +102,8 @@ Returned by the recordings and friends-activity endpoints, newest first.
   "chapter": "3",
   "durationMs": 3000,
   "notes": null,
+  "activity": "reading",
+  "passageId": null,
   "transcript": "It is a truth universally acknowledged…",
   "mimeType": "audio/ogg; codecs=opus",
   "sizeBytes": 27360,
@@ -110,6 +112,10 @@ Returned by the recordings and friends-activity endpoints, newest first.
 ```
 
 - `createdAt` is UTC, normalized from the record.
+- `activity` is the record's activity (`reading`, `passage`, `freeSpeech`,
+  `pitch`, `resonance`, or a newer value), or null for records from before
+  activities, which were all reading. `passageId` is the record's
+  `passage.id`, or null.
 - `transcript` is the record's `transcript.text`, or null (also when the
   record's transcript is malformed: the recording is still indexed).
 - `audioUrl` points at the author's PDS: the browser fetches audio directly,

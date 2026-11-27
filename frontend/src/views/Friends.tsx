@@ -3,7 +3,8 @@ import { useEffect, useState } from 'react'
 import { friendsActivity, type Recording } from '../api'
 import type { Session } from '../auth'
 import { RecordingItem } from '../components/RecordingItem'
-import { formatDuration, localDate, relativeDay, workLabel } from '../format'
+import { recordingTitle } from '../activities'
+import { formatDuration, localDate, relativeDay } from '../format'
 
 type Friend = {
   did: string
@@ -38,7 +39,7 @@ export function Friends({ session, dataVersion }: { session: Session; dataVersio
               Practiced {f.latestDayMs ? `${formatDuration(f.latestDayMs)} ` : ''}
               {relativeDay(f.latest.createdAt)}
             </span>
-            <span className="muted">{workLabel(f.latest.work, f.latest.chapter)}</span>
+            <span className="muted">{recordingTitle(f.latest)}</span>
           </li>
         ))}
       </ul>

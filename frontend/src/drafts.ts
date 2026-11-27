@@ -4,6 +4,7 @@
 
 import fixWebmDuration from 'fix-webm-duration'
 
+import type { Activity } from './activities'
 import type { TimedWord } from './transcription'
 
 export type Draft = {
@@ -15,6 +16,9 @@ export type Draft = {
   durationMs: number
   /** False if recording was interrupted (e.g. the tab closed). */
   finished: boolean
+  /** Absent in drafts from before activities: book reading. */
+  activity?: Activity
+  passageId?: string
   work: string
   chapter: string
   notes: string
@@ -62,7 +66,10 @@ async function run<T>(stores: string[], mode: IDBTransactionMode, body: (tx: IDB
   })
 }
 
-export async function createDraft(mimeType: string, fields: Pick<Draft, 'work' | 'chapter' | 'notes'>): Promise<Draft> {
+/** What was typed into the form, kept with the audio. */
+export type DraftFields = Pick<Draft, 'activity' | 'passageId' | 'work' | 'chapter' | 'notes'>
+
+export async function createDraft(mimeType: string, fields: DraftFields): Promise<Draft> {
   const draft: Draft = {
     id: crypto.randomUUID(),
     startedAt: new Date().toISOString(),

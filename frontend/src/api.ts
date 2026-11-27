@@ -4,6 +4,7 @@
 
 import type { Agent } from '@atproto/api'
 
+import type { Activity } from './activities'
 import type { TimedWord } from './transcription'
 
 export type Recording = {
@@ -15,6 +16,10 @@ export type Recording = {
   chapter: string | null
   durationMs: number | null
   notes: string | null
+  /** Null for recordings from before activities (all book reading). */
+  activity: string | null
+  /** For a fixed passage: which one (see passages.ts). */
+  passageId: string | null
   transcript: string | null
   mimeType: string | null
   sizeBytes: number | null
@@ -128,8 +133,11 @@ export function recordingDetail(uri: string): Promise<RecordingDetail> {
   return get(`/api/users/${encodeURIComponent(did)}/recordings/${encodeURIComponent(rkey)}`)
 }
 
-export function recordings(did: string, limit = 100): Promise<Recording[]> {
-  return get(`/api/users/${encodeURIComponent(did)}/recordings?limit=${limit}`)
+/** A user's recordings, newest first; `passage` limits them to one fixed passage. */
+export function recordings(did: string, limit = 100, passage?: string): Promise<Recording[]> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (passage) query.set('passage', passage)
+  return get(`/api/users/${encodeURIComponent(did)}/recordings?${query}`)
 }
 
 export function calendar(did: string, month: string): Promise<PracticeDay[]> {
@@ -167,6 +175,9 @@ export async function refreshMember(did: string): Promise<boolean> {
 export type NewRecording = {
   /** When the practice happened; defaults to now. */
   createdAt?: string
+  activity: Activity
+  /** For a fixed passage: its id. */
+  passageId?: string
   work: string
   chapter?: string
   notes?: string
@@ -185,7 +196,9 @@ export async function createRecording(agent: Agent, did: string, input: NewRecor
   const record = {
     $type: 'club.voicebook.recording',
     createdAt: input.createdAt ?? new Date().toISOString(),
+    activity: input.activity,
     work: input.work,
+    ...(input.passageId ? { passage: { id: input.passageId } } : {}),
     ...(input.chapter ? { chapter: input.chapter } : {}),
     ...(input.notes ? { notes: input.notes } : {}),
     ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),

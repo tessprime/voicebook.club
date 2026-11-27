@@ -248,6 +248,8 @@ struct RecordingRow {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    activity: Option<String>,
+    passage_id: Option<String>,
     transcript: Option<String>,
     blob_cid: String,
     mime_type: Option<String>,
@@ -265,6 +267,9 @@ struct Recording {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    /// Null for recordings from before activities, which were all reading.
+    activity: Option<String>,
+    passage_id: Option<String>,
     transcript: Option<String>,
     mime_type: Option<String>,
     size_bytes: Option<i64>,
@@ -284,6 +289,8 @@ impl From<RecordingRow> for Recording {
             chapter: row.chapter,
             duration_ms: row.duration_ms,
             notes: row.notes,
+            activity: row.activity,
+            passage_id: row.passage_id,
             transcript: row.transcript,
             mime_type: row.mime_type,
             size_bytes: row.size_bytes,
@@ -293,7 +300,7 @@ impl From<RecordingRow> for Recording {
 }
 
 const RECORDING_COLUMNS: &str = "SELECT r.uri, r.did, m.handle, m.pds_url, r.created_at, r.work, r.chapter, r.duration_ms,
-            r.notes, r.transcript, r.blob_cid, r.mime_type, r.size_bytes
+            r.notes, r.activity, r.passage_id, r.transcript, r.blob_cid, r.mime_type, r.size_bytes
      FROM recordings r JOIN members m ON m.did = r.did";
 
 #[derive(Deserialize)]
@@ -303,6 +310,8 @@ struct Page {
     before: Option<String>,
     /// Only recordings created at or after this RFC 3339 UTC timestamp.
     since: Option<String>,
+    /// Only recordings of this passage (recordings endpoint only).
+    passage: Option<String>,
 }
 
 impl Page {
@@ -319,6 +328,7 @@ async fn recordings(
     state.require_access(&did)?;
     let rows: Vec<RecordingRow> = sqlx::query_as(&format!(
         "{RECORDING_COLUMNS} WHERE r.did = ? AND (? IS NULL OR r.created_at < ?) AND (? IS NULL OR r.created_at >= ?)
+           AND (? IS NULL OR r.passage_id = ?)
          ORDER BY r.created_at DESC LIMIT ?"
     ))
     .bind(&did)
@@ -326,6 +336,8 @@ async fn recordings(
     .bind(&page.before)
     .bind(&page.since)
     .bind(&page.since)
+    .bind(&page.passage)
+    .bind(&page.passage)
     .bind(page.limit())
     .fetch_all(&state.db)
     .await?;

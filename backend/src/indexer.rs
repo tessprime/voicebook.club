@@ -51,6 +51,9 @@ struct RecordingRecord {
     chapter: Option<String>,
     duration_ms: Option<i64>,
     notes: Option<String>,
+    /// Read loosely, like the transcript: a malformed value is dropped, not the recording.
+    activity: Option<serde_json::Value>,
+    passage: Option<serde_json::Value>,
     /// Read loosely: a malformed transcript drops the transcript, not the recording.
     transcript: Option<serde_json::Value>,
     audio: BlobRef,
@@ -68,6 +71,16 @@ struct TimedWord {
 }
 
 impl RecordingRecord {
+    /// The activity, as written (unknown values are kept for newer clients).
+    fn activity(&self) -> Option<&str> {
+        self.activity.as_ref()?.as_str().filter(|a| !a.is_empty() && a.len() <= 64)
+    }
+
+    /// Which passage was read, if this was a passage.
+    fn passage_id(&self) -> Option<&str> {
+        self.passage.as_ref()?.get("id")?.as_str().filter(|id| !id.is_empty() && id.len() <= 640)
+    }
+
     fn transcript_text(&self) -> Option<&str> {
         self.transcript.as_ref()?.get("text")?.as_str()
     }
@@ -510,11 +523,12 @@ async fn upsert_recording(tx: &mut Transaction<'_, Sqlite>, did: &str, rkey: &st
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO recordings (uri, did, rkey, cid, created_at, work, chapter, duration_ms, notes, transcript, transcript_words, blob_cid, mime_type, size_bytes, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ'))
+        "INSERT INTO recordings (uri, did, rkey, cid, created_at, work, chapter, duration_ms, notes, activity, passage_id, transcript, transcript_words, blob_cid, mime_type, size_bytes, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ'))
          ON CONFLICT (uri) DO UPDATE SET
            cid = excluded.cid, created_at = excluded.created_at, work = excluded.work,
            chapter = excluded.chapter, duration_ms = excluded.duration_ms, notes = excluded.notes,
+           activity = excluded.activity, passage_id = excluded.passage_id,
            transcript = excluded.transcript, transcript_words = excluded.transcript_words,
            blob_cid = excluded.blob_cid, mime_type = excluded.mime_type,
            size_bytes = excluded.size_bytes, indexed_at = excluded.indexed_at",
@@ -528,6 +542,8 @@ async fn upsert_recording(tx: &mut Transaction<'_, Sqlite>, did: &str, rkey: &st
     .bind(&record.chapter)
     .bind(record.duration_ms)
     .bind(&record.notes)
+    .bind(record.activity())
+    .bind(record.passage_id())
     .bind(record.transcript_text())
     .bind(record.transcript_words())
     .bind(&record.audio.link.cid)
@@ -624,6 +640,38 @@ mod tests {
         let created_at: String = sqlx::query_scalar("SELECT created_at FROM recordings").fetch_one(&ix.db).await.unwrap();
         assert_eq!(created_at, "2026-10-05T07:00:00.000Z", "normalized to UTC");
         assert_eq!(ix.cursor(CURSOR).await.unwrap(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn activities_and_passages_are_indexed() {
+        let ix = indexer().await;
+        let mut passage = recording(ALICE, 1, "r1", "2026-11-27T09:00:00Z");
+        let record = passage.commit.as_mut().unwrap().record.as_mut().unwrap();
+        record["activity"] = json!("passage");
+        record["work"] = json!("Comma Gets a Cure");
+        record["passage"] = json!({"id": "builtin:comma-gets-a-cure"});
+        ix.handle(&passage, CURSOR).await.unwrap();
+
+        // From before activities: no activity, no passage.
+        ix.handle(&recording(ALICE, 2, "r2", "2026-11-27T10:00:00Z"), CURSOR).await.unwrap();
+
+        // A malformed activity or passage is dropped; the recording is kept.
+        let mut odd = recording(ALICE, 3, "r3", "2026-11-27T11:00:00Z");
+        let record = odd.commit.as_mut().unwrap().record.as_mut().unwrap();
+        record["activity"] = json!(7);
+        record["passage"] = json!("builtin:comma-gets-a-cure");
+        ix.handle(&odd, CURSOR).await.unwrap();
+
+        let rows: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT rkey, activity, passage_id FROM recordings ORDER BY rkey").fetch_all(&ix.db).await.unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("r1".into(), Some("passage".into()), Some("builtin:comma-gets-a-cure".into())),
+                ("r2".into(), None, None),
+                ("r3".into(), None, None),
+            ]
+        );
     }
 
     #[tokio::test]

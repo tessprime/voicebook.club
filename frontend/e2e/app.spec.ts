@@ -259,6 +259,66 @@ test('a transcription service set up in Settings fills in the transcript, which 
   await expect(details).toHaveCount(0)
 })
 
+test('a fixed passage is shown while recording, becomes the transcript, and its recordings compare over time', async ({ page }) => {
+  await signIn(page, 'alice.test')
+  const details = page.getByRole('complementary', { name: 'Recording details' })
+  const notes = `e2e-passage-${Date.now()}`
+
+  // Two recordings of the same passage, without a transcription service.
+  for (const take of [1, 2]) {
+    await page.getByRole('button', { name: 'Start Practice' }).click()
+    await page.getByLabel('Activity').selectOption({ label: 'Fixed passage' })
+    await page.getByLabel(/^Passage/).selectOption({ label: 'The Wind and the Sun' })
+    await expect(page.locator('.passage-text')).toContainText('The Wind and the Sun were disputing which was the stronger.')
+    await expect(page.getByLabel(/^Transcript/)).toHaveValue(/^The Wind and the Sun were disputing/)
+    await page.getByLabel(/^Notes/).fill(`${notes} take ${take}`)
+    await page.getByRole('tab', { name: 'Upload a file' }).click()
+    await page.getByLabel('Audio file').setInputFiles(testTone(2))
+    await page.getByRole('button', { name: 'Save recording' }).click()
+    await expect(page.locator('.recording', { hasText: `${notes} take ${take}` })).toBeVisible({ timeout: 15_000 })
+  }
+
+  const item = page.locator('.recording', { hasText: `${notes} take 2` })
+  await expect(item.locator('.recording-work')).toHaveText('Passage: The Wind and the Sun')
+  await item.locator('.recording-work').click()
+  await expect(details.getByRole('heading', { name: 'Passage: The Wind and the Sun' })).toBeVisible()
+  await expect(details.locator('.timed-transcript')).toContainText('Kindness effects more than Severity.')
+
+  // Compare over time: this take and the earlier one (and any from earlier runs), oldest first.
+  const history = details.locator('.passage-history')
+  await expect(history).toContainText('recordings of this passage')
+  await expect(history.locator('[aria-current="true"]')).toContainText('(this one)')
+  await expect(history.locator('li').last()).toContainText('(this one)')
+  await history.locator('li button').last().click()
+  await expect(details.locator('.recording-notes')).toHaveText(`${notes} take 1`)
+
+  // In the public record: the activity, the passage, and its text as the transcript.
+  const recent: { uri: string; notes: string | null }[] = await (
+    await page.request.get(`/api/users/${encodeURIComponent(accounts.alice.did)}/recordings?limit=20`)
+  ).json()
+  const [, , did, collection, rkey] = recent.find((r) => r.notes === `${notes} take 2`)!.uri.split('/')
+  const stored = await (
+    await page.request.get(`http://localhost:2583/xrpc/com.atproto.repo.getRecord?repo=${did}&collection=${collection}&rkey=${rkey}`)
+  ).json()
+  expect(stored.value.activity).toBe('passage')
+  expect(stored.value.work).toBe('The Wind and the Sun')
+  expect(stored.value.passage).toEqual({ id: 'builtin:the-wind-and-the-sun' })
+  expect(stored.value.transcript.text).toMatch(/^The Wind and the Sun were disputing[\s\S]*Kindness effects more than Severity\.$/)
+
+  // An exercise is labelled with what was practiced.
+  await details.getByRole('button', { name: 'Close details' }).click()
+  await page.getByRole('button', { name: 'Start Practice' }).click()
+  await page.getByLabel('Activity').selectOption({ label: 'Pitch exercise' })
+  await page.getByLabel(/^Exercise/).selectOption('Target pitch')
+  await page.getByLabel(/^Notes/).fill(`${notes} pitch`)
+  await page.getByRole('tab', { name: 'Upload a file' }).click()
+  await page.getByLabel('Audio file').setInputFiles(testTone(2))
+  await page.getByRole('button', { name: 'Save recording' }).click()
+  const pitch = page.locator('.recording', { hasText: `${notes} pitch` })
+  await expect(pitch).toBeVisible({ timeout: 15_000 })
+  await expect(pitch.locator('.recording-work')).toHaveText('Pitch: Target pitch')
+})
+
 test('record in the browser; the draft survives a reload until saved', async ({ page }) => {
   await signIn(page, 'alice.test')
   // Start clean: drop drafts left by earlier runs.
