@@ -173,6 +173,9 @@ review: scope, findings, and how each was resolved.
 
 - [2026-10-06: authentication, API authorization, fetch guard](../sec_revs/2026-10-06-auth-and-fetch-guard.md):
   no high or medium findings; five low, all fixed.
+- [2026-11-05: container image and registry](../sec_revs/2026-11-05-container-image.md):
+  not affected by Alpine's OpenSSH bypass; one medium (stale Debian
+  packages) and three low, pending decisions.
 
 ## Open items
 
