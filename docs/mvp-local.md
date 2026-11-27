@@ -179,7 +179,10 @@ The simplest MVP flow is:
    - Free speech: an optional topic.
    - Pitch or resonance exercise: which exercise.
 
-   Built-in passages (licenses checked for VB-349): "The Wind and the Sun" (Aesop, Joseph Jacobs' 1894 translation; public domain). Left out: "Comma Gets a Cure" (its license asks for the copyright notice "in audio format" on sound recordings, which users' public recordings wouldn't carry), the IPA's English wording of "The North Wind and the Sun" (no reuse permission found), the Rainbow Passage (public-domain status unconfirmed), the Grandfather Passage (no reliable source), "Please call Stella" (CC BY-NC-SA).
+   Built-in passages (VB-349):
+   - "The Rainbow Passage" (Grant Fairbanks, *Voice and Articulation Drillbook*, 1960) and "The Grandfather Passage" (commonly attributed to Charles Van Riper, 1963): standard voice-assessment texts, with the wording taken from VoiceTrainer (github.com/petravanta/voicetrainer, MIT). **Copyright unconfirmed:** the Rainbow Passage is called public domain only by IDEA (dialectsarchive.com); it would be if the book's copyright wasn't renewed, which a search of the US renewal records would settle. The Grandfather Passage's original source wasn't found. VoiceTrainer's MIT license covers its own work, not these texts. Included at the maintainer's decision (2026-11-27); remove them if a rights holder objects.
+   - "The Wind and the Sun" (Aesop, Joseph Jacobs' 1894 translation): public domain.
+   - Left out: "Comma Gets a Cure" (its license asks for the copyright notice "in audio format" on sound recordings, which users' public recordings wouldn't carry), the IPA's English wording of "The North Wind and the Sun" (no reuse permission found), "Please call Stella" (CC BY-NC-SA).
 3. User records in the browser, or selects an audio file from disk.
    - Browser recordings are written to IndexedDB chunk by chunk while recording, and kept there until saved: a closed tab or failed upload loses nothing, and unsaved recordings are offered back on the Practice view.
    - The record's `createdAt` is when recording started, not when it was saved.
