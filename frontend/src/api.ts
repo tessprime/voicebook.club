@@ -101,10 +101,12 @@ export async function backendSession(): Promise<BackendSession> {
  */
 export async function signInToBackend(agent: Agent): Promise<BackendSession> {
   const info = await backendSession()
+  // No `exp`: the PDS then sets it to 60 s from now by its own clock. One
+  // computed from this device's clock fails on a device more than a minute
+  // slow ("expiration is in past") or an hour fast (VB-347).
   const { data } = await agent.com.atproto.server.getServiceAuth({
     aud: info.audience,
     lxm: info.lxm,
-    exp: Math.floor(Date.now() / 1000) + 60,
   })
   const res = await fetch('/api/session', { method: 'POST', headers: { authorization: `Bearer ${data.token}` } })
   if (res.status === 403) throw new NotInvitedError()

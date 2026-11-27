@@ -386,6 +386,14 @@ test('an admin can refresh any account and reindex', async ({ page }) => {
   expect((await page.request.post('/api/admin/reindex', { headers: csrf })).status()).toBe(200)
 })
 
+test('signing in works on a device whose clock is a few minutes slow', async ({ page }) => {
+  // VB-347: the service-auth token's expiry used to come from the device's
+  // clock, which the PDS rejects ("expiration is in past") on a slow device.
+  await page.clock.install({ time: Date.now() - 3 * 60_000 })
+  await signIn(page, 'alice.test')
+  await expect(page.getByRole('button', { name: 'Start Practice' })).toBeVisible()
+})
+
 test('a lost backend session is renewed transparently', async ({ page, context }) => {
   await signIn(page, 'alice.test')
   // As if the backend's database were lost, or the session expired.

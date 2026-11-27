@@ -26,7 +26,7 @@ verifying users without ever holding their PDS credentials.
 browser                         user's PDS                       Voicebook backend
    │ GET /api/session ─────────────────────────────────────────────▶│
    │◀──────────────────── { audience, lxm, did: null } ─────────────│
-   │ getServiceAuth(aud, lxm, exp=60s) ─▶│                          │
+   │ getServiceAuth(aud, lxm) ──────────▶│ (exp: its clock + 60 s)  │
    │◀──────────────── JWT ───────────────│                          │
    │ POST /api/session  Authorization: Bearer <JWT> ───────────────▶│ verify (below)
    │◀────────── Set-Cookie: __Host-vb_session=…; HttpOnly; SameSite=Strict │

@@ -19,9 +19,13 @@ The frontend first asks the user's PDS for the token, with the `audience` and
 const { data } = await agent.com.atproto.server.getServiceAuth({
   aud: 'did:web:voicebook.club#voicebook',
   lxm: 'club.voicebook.auth.createSession',
-  exp: Math.floor(Date.now() / 1000) + 60,
 })
 ```
+
+It doesn't send `exp`: the PDS then sets it to 60 seconds after issuing the
+token, by its own clock. An `exp` computed from the device's clock is
+rejected by the PDS ("expiration is in past") when the device is more than a
+minute slow, or more than an hour fast.
 
 ```http
 POST /api/session
@@ -73,7 +77,7 @@ sequenceDiagram
     participant A as Backend
     participant L as PLC directory
     participant D as SQLite
-    B->>P: getServiceAuth(aud, lxm, exp = now+60s) [OAuth, DPoP]
+    B->>P: getServiceAuth(aud, lxm) [OAuth, DPoP], exp set by the PDS (its time + 60 s)
     P->>P: check OAuth scope rpc:club.voicebook.auth.createSession
     P-->>B: JWT signed with the account's key
     B->>A: POST /api/session, Authorization: Bearer JWT
