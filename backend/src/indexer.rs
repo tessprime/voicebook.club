@@ -648,8 +648,8 @@ mod tests {
         let mut passage = recording(ALICE, 1, "r1", "2026-11-27T09:00:00Z");
         let record = passage.commit.as_mut().unwrap().record.as_mut().unwrap();
         record["activity"] = json!("passage");
-        record["work"] = json!("Comma Gets a Cure");
-        record["passage"] = json!({"id": "builtin:comma-gets-a-cure"});
+        record["work"] = json!("The Wind and the Sun");
+        record["passage"] = json!({"id": "builtin:the-wind-and-the-sun"});
         ix.handle(&passage, CURSOR).await.unwrap();
 
         // From before activities: no activity, no passage.
@@ -659,7 +659,7 @@ mod tests {
         let mut odd = recording(ALICE, 3, "r3", "2026-11-27T11:00:00Z");
         let record = odd.commit.as_mut().unwrap().record.as_mut().unwrap();
         record["activity"] = json!(7);
-        record["passage"] = json!("builtin:comma-gets-a-cure");
+        record["passage"] = json!("builtin:the-wind-and-the-sun");
         ix.handle(&odd, CURSOR).await.unwrap();
 
         let rows: Vec<(String, Option<String>, Option<String>)> =
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("r1".into(), Some("passage".into()), Some("builtin:comma-gets-a-cure".into())),
+                ("r1".into(), Some("passage".into()), Some("builtin:the-wind-and-the-sun".into())),
                 ("r2".into(), None, None),
                 ("r3".into(), None, None),
             ]

@@ -4,7 +4,6 @@ import { recordingTitle } from '../activities'
 import { recordingDetail, setTranscript, type Recording, type RecordingDetail } from '../api'
 import type { Session } from '../auth'
 import { formatClock, formatDateTime, formatDuration } from '../format'
-import { findPassage } from '../passages'
 import { transcribe, type TimedWord, type TranscriptionEndpoint } from '../transcription'
 import '../vendor/voice-spectrogram/voice-spectrogram.js'
 import type { SeekEvent, VoiceSpectrogram } from '../vendor/voice-spectrogram/voice-spectrogram'
@@ -176,7 +175,6 @@ export function RecordingDetails({
 
   // Only the author can change the record.
   const own = recording.did === session.did
-  const passage = findPassage(recording.passageId)
 
   async function runTranscription(endpoint: TranscriptionEndpoint) {
     if (audio.kind !== 'ready') return
@@ -289,7 +287,6 @@ export function RecordingDetails({
           {transcribing.kind === 'pending' && <p className="muted hint">Saved. It may take a moment to show here.</p>}
         </div>
       )}
-      {passage?.notice && <p className="muted passage-source">{passage.notice}</p>}
       {recording.passageId && <PassageHistory recording={{ ...recording, passageId: recording.passageId }} />}
     </aside>
   )

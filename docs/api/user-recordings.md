@@ -18,7 +18,7 @@ Cookie: __Host-vb_session=…
 | `limit` | 50 | Clamped to 1–200 |
 | `before` | none | RFC 3339 UTC; only recordings created strictly before it |
 | `since` | none | RFC 3339 UTC; only recordings created at or after it (see [Paging](README.md#paging)) |
-| `passage` | none | Only recordings of this fixed passage (its id, e.g. `builtin:comma-gets-a-cure`): the details panel's compare-over-time list |
+| `passage` | none | Only recordings of this fixed passage (its id, e.g. `builtin:the-wind-and-the-sun`): the details panel's compare-over-time list |
 
 ## Response
 

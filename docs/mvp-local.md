@@ -179,7 +179,7 @@ The simplest MVP flow is:
    - Free speech: an optional topic.
    - Pitch or resonance exercise: which exercise.
 
-   Built-in passages (licenses checked for VB-349): "Comma Gets a Cure" (McCullough, Somerville & Honorof, 2000; free use with its permission sentence and copyright notice, which the app shows with the text) and "The Wind and the Sun" (Aesop, Joseph Jacobs' 1894 translation; public domain). Left out: the IPA's English wording of "The North Wind and the Sun" (no reuse permission found), the Rainbow Passage (public-domain status unconfirmed), the Grandfather Passage (no reliable source), "Please call Stella" (CC BY-NC-SA).
+   Built-in passages (licenses checked for VB-349): "The Wind and the Sun" (Aesop, Joseph Jacobs' 1894 translation; public domain). Left out: "Comma Gets a Cure" (its license asks for the copyright notice "in audio format" on sound recordings, which users' public recordings wouldn't carry), the IPA's English wording of "The North Wind and the Sun" (no reuse permission found), the Rainbow Passage (public-domain status unconfirmed), the Grandfather Passage (no reliable source), "Please call Stella" (CC BY-NC-SA).
 3. User records in the browser, or selects an audio file from disk.
    - Browser recordings are written to IndexedDB chunk by chunk while recording, and kept there until saved: a closed tab or failed upload loses nothing, and unsaved recordings are offered back on the Practice view.
    - The record's `createdAt` is when recording started, not when it was saved.
@@ -307,7 +307,7 @@ The exact Lexicon should be versioned in the repository.
   exercise (e.g. "Target pitch").
 - `passage`: `{id}`, for a fixed passage, so recordings of the same text can
   be compared over time. Built-in passages have ids like
-  `builtin:comma-gets-a-cure` (see `frontend/src/passages.ts`); the reader's
+  `builtin:the-wind-and-the-sun` (see `frontend/src/passages.ts`); the reader's
   own passages, planned, will use their records' AT URIs.
 - `chapter`
 - `durationMs`

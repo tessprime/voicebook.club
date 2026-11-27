@@ -1,6 +1,6 @@
 import type { Passage } from '../passages'
 
-/** A fixed passage's text to read from, with its source and any required notice. */
+/** A fixed passage's text to read from, with its source. */
 export function PassageText({ passage }: { passage: Passage }) {
   return (
     <div className="passage-text">
@@ -8,7 +8,6 @@ export function PassageText({ passage }: { passage: Passage }) {
         <p key={i}>{paragraph}</p>
       ))}
       <p className="muted passage-source">{passage.source}</p>
-      {passage.notice && <p className="muted passage-source">{passage.notice}</p>}
     </div>
   )
 }
